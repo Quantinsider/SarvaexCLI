@@ -460,6 +460,17 @@ impl Client {
                 contract.kind().as_str()
             )));
         }
+        if contract.is_expired() {
+            return Err(SarvaexError::Validation(format!(
+                "{} closed at {} and is waiting to be settled; do not trade it",
+                contract.ticker,
+                contract
+                    .close_at
+                    .as_deref()
+                    .or(contract.expected_resolution_at.as_deref())
+                    .unwrap_or("its expiry time")
+            )));
+        }
         price::validate_count(&contract, order.count)?;
         if order.order_type == OrderType::Limit {
             price::validate_limit_price(&contract, order.price_ticks)?;

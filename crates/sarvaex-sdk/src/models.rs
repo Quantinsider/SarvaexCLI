@@ -343,6 +343,22 @@ impl Contract {
     pub fn state(&self) -> ContractState {
         ContractState::from_code(self.state)
     }
+    /// True once the close time (or, without one, the expected resolution time) has passed.
+    /// An expired contract can still say `OPEN` while it waits to be settled.
+    pub fn is_expired_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let parse = |value: &Option<String>| {
+            value
+                .as_deref()
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.with_timezone(&chrono::Utc))
+        };
+        parse(&self.close_at)
+            .or_else(|| parse(&self.expected_resolution_at))
+            .is_some_and(|deadline| deadline <= now)
+    }
+    pub fn is_expired(&self) -> bool {
+        self.is_expired_at(chrono::Utc::now())
+    }
     pub fn is_open(&self) -> bool {
         self.state() == ContractState::Open
     }
@@ -435,9 +451,42 @@ pub struct OrderBook {
     pub ts: Option<String>,
     pub bids: Vec<BookLevel>,
     pub asks: Vec<BookLevel>,
+    /// Binary contracts only: the YES bids, best first.
+    pub yes: Vec<BookLevel>,
+    /// Binary contracts only: the NO bids, best first (a NO bid at q is a YES ask at 100 - q).
+    pub no: Vec<BookLevel>,
+    /// Binary contracts only: best price on each side, as the gateway derives it.
+    pub best: Option<BookBest>,
+}
+
+/// Best prices on both outcomes of a binary contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BookBest {
+    pub yes_bid: Option<i64>,
+    pub yes_ask: Option<i64>,
+    pub no_bid: Option<i64>,
+    pub no_ask: Option<i64>,
 }
 
 impl OrderBook {
+    /// Best prices on both outcomes. Uses the gateway's `best` when present, otherwise derives
+    /// them from the YES book: buying NO costs `100 - best YES bid`, selling it gets
+    /// `100 - best YES ask`.
+    pub fn outcome_best(&self) -> BookBest {
+        if let Some(best) = &self.best {
+            return best.clone();
+        }
+        let yes_bid = self.best_bid().map(|l| l.price_ticks);
+        let yes_ask = self.best_ask().map(|l| l.price_ticks);
+        BookBest {
+            yes_bid,
+            yes_ask,
+            no_bid: yes_ask.map(|p| 100 - p),
+            no_ask: yes_bid.map(|p| 100 - p),
+        }
+    }
+
     pub fn best_bid(&self) -> Option<&BookLevel> {
         self.bids.iter().max_by_key(|l| l.price_ticks)
     }
@@ -466,6 +515,9 @@ pub struct PublicFill {
     pub aggressor_side: Value,
     pub maker_fee_micro_usdc: i64,
     pub taker_fee_micro_usdc: i64,
+    /// Binary contracts: the trade price as a YES and as a NO price (they add up to 100).
+    pub yes_price_ticks: Option<i64>,
+    pub no_price_ticks: Option<i64>,
     pub ts: Option<String>,
 }
 
@@ -736,6 +788,11 @@ pub struct PrivateFill {
     pub count: i64,
     pub aggressor_side: Value,
     pub fee_micro_usdc: i64,
+    /// Binary contracts: the price on the side the order was stored on. A NO order is stored as
+    /// the opposite YES order, so for NO traders `no_price_ticks` is the price they paid.
+    pub outcome_price_ticks: Option<i64>,
+    pub yes_price_ticks: Option<i64>,
+    pub no_price_ticks: Option<i64>,
     pub ts: Option<String>,
 }
 
@@ -1072,4 +1129,68 @@ pub enum WsEvent {
     },
     #[serde(other)]
     Other,
+}
+
+#[cfg(test)]
+mod yes_no_tests {
+    use super::*;
+
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn contract_is_expired_by_close_time_then_resolution_time() {
+        let now = at("2026-11-06T00:00:00Z");
+        let mut c = Contract::default();
+        assert!(!c.is_expired_at(now), "no times means not expired");
+        c.expected_resolution_at = Some("2026-10-01T00:00:00+00:00".into());
+        assert!(c.is_expired_at(now), "past resolution with no close time");
+        c.close_at = Some("2026-12-01T00:00:00+00:00".into());
+        assert!(!c.is_expired_at(now), "a future close time wins");
+        c.close_at = Some("2026-11-05T23:59:59+00:00".into());
+        assert!(c.is_expired_at(now));
+    }
+
+    #[test]
+    fn book_best_is_derived_from_the_yes_book_when_the_gateway_omits_it() {
+        let level = |p| BookLevel {
+            price_ticks: p,
+            total_qty: 5,
+            order_count: 1,
+        };
+        let book = OrderBook {
+            bids: vec![level(42)],
+            asks: vec![level(44)],
+            ..Default::default()
+        };
+        let best = book.outcome_best();
+        assert_eq!((best.yes_bid, best.yes_ask), (Some(42), Some(44)));
+        // Buying NO costs 100 - best YES bid; a NO bid rests at 100 - best YES ask.
+        assert_eq!((best.no_ask, best.no_bid), (Some(58), Some(56)));
+    }
+
+    #[test]
+    fn book_and_fills_parse_the_yes_no_fields() {
+        let book: OrderBook = serde_json::from_str(
+            r#"{"ticker":"T","seq":1,"bids":[],"asks":[],
+                "yes":[{"price_ticks":49,"total_qty":120,"order_count":8}],
+                "no":[{"price_ticks":49,"total_qty":96,"order_count":6}],
+                "best":{"yes_bid":49,"yes_ask":51,"no_bid":49,"no_ask":51}}"#,
+        )
+        .unwrap();
+        assert_eq!(book.yes.len(), 1);
+        assert_eq!(book.no[0].total_qty, 96);
+        assert_eq!(book.outcome_best().no_ask, Some(51));
+
+        let fill: PrivateFill = serde_json::from_str(
+            r#"{"fill_id":"f","price_ticks":60,"outcome_price_ticks":60,"yes_price_ticks":60,"no_price_ticks":40}"#,
+        )
+        .unwrap();
+        assert_eq!(fill.no_price_ticks, Some(40));
+        let old: PublicFill = serde_json::from_str(r#"{"fill_id":"f","price_ticks":60}"#).unwrap();
+        assert_eq!(old.no_price_ticks, None, "older gateways omit the fields");
+    }
 }

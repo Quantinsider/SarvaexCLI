@@ -18,7 +18,11 @@ pub fn contract_row(c: &Contract) -> Vec<String> {
     vec![
         c.ticker.clone(),
         c.kind().as_str().to_owned(),
-        c.state().as_str().to_owned(),
+        if c.is_expired() {
+            "EXPIRED".to_owned()
+        } else {
+            c.state().as_str().to_owned()
+        },
         c.category().unwrap_or("").to_owned(),
         truncate(&c.question, 70),
         format!(
@@ -114,13 +118,37 @@ pub async fn markets(ctx: &Ctx, cmd: MarketsCmd) -> Result<i32> {
             bids.sort_by_key(|l| std::cmp::Reverse(l.price_ticks));
             let mut asks = book.asks.clone();
             asks.sort_by_key(|l| l.price_ticks);
-            let v = json!({
+            let binary = c.kind() == ContractKind::Binary;
+            let best = binary.then(|| book.outcome_best());
+            let level = |l: &sarvaex_sdk::models::BookLevel| json!({"price_ticks": l.price_ticks, "price": enc.format(l.price_ticks), "qty": l.total_qty, "orders": l.order_count});
+            let mut v = json!({
                 "ticker": book.ticker, "seq": book.seq, "ts": book.ts,
                 "best_bid": book.best_bid().map(|l| json!({"price_ticks": l.price_ticks, "price": enc.format(l.price_ticks), "qty": l.total_qty})),
                 "best_ask": book.best_ask().map(|l| json!({"price_ticks": l.price_ticks, "price": enc.format(l.price_ticks), "qty": l.total_qty})),
-                "bids": bids.iter().map(|l| json!({"price_ticks": l.price_ticks, "price": enc.format(l.price_ticks), "qty": l.total_qty, "orders": l.order_count})).collect::<Vec<_>>(),
-                "asks": asks.iter().map(|l| json!({"price_ticks": l.price_ticks, "price": enc.format(l.price_ticks), "qty": l.total_qty, "orders": l.order_count})).collect::<Vec<_>>(),
+                "bids": bids.iter().map(level).collect::<Vec<_>>(),
+                "asks": asks.iter().map(level).collect::<Vec<_>>(),
             });
+            if let Some(b) = &best {
+                // The NO side of the one YES book: a NO bid at q is a YES ask at 100 - q.
+                let mut no_bids = book.no.clone();
+                if no_bids.is_empty() {
+                    no_bids = asks
+                        .iter()
+                        .map(|l| sarvaex_sdk::models::BookLevel {
+                            price_ticks: 100 - l.price_ticks,
+                            total_qty: l.total_qty,
+                            order_count: l.order_count,
+                        })
+                        .collect();
+                }
+                no_bids.sort_by_key(|l| std::cmp::Reverse(l.price_ticks));
+                v["yes"] = json!(bids.iter().map(level).collect::<Vec<_>>());
+                v["no"] = json!(no_bids.iter().map(level).collect::<Vec<_>>());
+                v["best"] = json!({"yes_bid": b.yes_bid, "yes_ask": b.yes_ask, "no_bid": b.no_bid, "no_ask": b.no_ask});
+            }
+            if c.is_expired() {
+                v["expired"] = json!(true);
+            }
             ctx.out.emit(&v, || {
                 let mut t = table(&["bid qty", "bid", "ask", "ask qty"]);
                 let n = bids.len().max(asks.len());
@@ -135,13 +163,17 @@ pub async fn markets(ctx: &Ctx, cmd: MarketsCmd) -> Result<i32> {
                     ]);
                 }
                 let mut head = format!("{}  seq {}", book.ticker, book.seq);
-                if c.kind() == ContractKind::Binary
-                    && let Some(a) = book.best_ask()
-                {
+                if c.is_expired() {
+                    head.push_str("  [EXPIRED: waiting to be settled, do not trade]");
+                }
+                if let Some(b) = &best {
+                    let cents = |p: Option<i64>| p.map(|p| enc.format(p)).unwrap_or_else(|| "-".into());
                     head.push_str(&format!(
-                        "  implied YES ≈ {}%  (NO ask = {})",
-                        a.price_ticks,
-                        enc.format(100 - a.price_ticks)
+                        "\nYES  bid {}  ask {}\nNO   bid {}  ask {}   (buying NO costs 100 - best YES bid)",
+                        cents(b.yes_bid),
+                        cents(b.yes_ask),
+                        cents(b.no_bid),
+                        cents(b.no_ask)
                     ));
                 }
                 format!("{head}\n{t}")
@@ -213,7 +245,7 @@ async fn list(ctx: &Ctx, args: MarketListArgs) -> Result<i32> {
         cursor: args.cursor,
         ..Default::default()
     };
-    let (items, next) = if args.all {
+    let (mut items, next) = if args.all {
         (
             ctx.client().list_all_markets(&filter, 50).await?,
             String::new(),
@@ -222,6 +254,10 @@ async fn list(ctx: &Ctx, args: MarketListArgs) -> Result<i32> {
         let page = ctx.client().list_markets(&filter).await?;
         (page.items, page.next_cursor)
     };
+    // Contracts past their close time can still say OPEN while they wait to be settled.
+    if !args.include_expired {
+        items.retain(|c| !c.is_expired());
+    }
     ctx.out.emit(
         &json!({ "count": items.len(), "contracts": items, "next_cursor": next }),
         || {

@@ -309,6 +309,9 @@ pub struct MarketListArgs {
     /// Follow pagination and return everything
     #[arg(long)]
     pub all: bool,
+    /// Also show contracts past their close time that are still waiting to be settled
+    #[arg(long)]
+    pub include_expired: bool,
 }
 
 #[derive(Debug, Subcommand)]
