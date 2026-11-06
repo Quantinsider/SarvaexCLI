@@ -15,15 +15,29 @@ Everything speaks the public gateway only — no privileged access, no backend c
 
 ## Install
 
-```bash
-# from source (Rust 1.89+)
-cargo install --path crates/sarvaex-cli
+macOS and Linux:
 
-# or build the whole workspace
-cargo build --release          # → target/release/sarvaex
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.sh | sh
 ```
 
-Pre-built binaries are published on the GitHub Releases page by the release workflow in `.github/workflows/`.
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.ps1 | iex
+```
+
+Both download the release for your machine, check its SHA-256 checksum and put `sarvaex` on your PATH
+(`~/.local/bin` on macOS and Linux). You can also download an archive from the
+[Releases page](https://github.com/Rustix69/SarvaexCLI/releases).
+
+With Rust 1.89+ installed, build from source instead:
+
+```bash
+cargo install --git https://github.com/Rustix69/SarvaexCLI sarvaex-cli
+```
+
+Then create an account on the Sarvaex website and run `sarvaex auth login`.
 
 ## Quick start
 

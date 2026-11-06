@@ -1,7 +1,7 @@
 name: release
 on:
   push:
-    tags: ["sarvaex-v*"]
+    tags: ["v*"]
 permissions:
   contents: write
 jobs:
@@ -15,22 +15,17 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: sarvaex-cli
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sarvaex-cli
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake
       - run: cargo build --release -p sarvaex-cli --target ${{ matrix.target }}
@@ -39,11 +34,16 @@ jobs:
         run: |
           set -euo pipefail
           BIN=sarvaex; [[ "${{ runner.os }}" == "Windows" ]] && BIN=sarvaex.exe
-          NAME=sarvaex-${GITHUB_REF_NAME#sarvaex-v}-${{ matrix.target }}
+          NAME=sarvaex-${GITHUB_REF_NAME#v}-${{ matrix.target }}
           mkdir -p dist/$NAME
           cp target/${{ matrix.target }}/release/$BIN README.md SKILL.md dist/$NAME/
-          cd dist && if [[ "${{ runner.os }}" == "Windows" ]]; then 7z a $NAME.zip $NAME; else tar czf $NAME.tar.gz $NAME; fi
+          cd dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then ARCHIVE=$NAME.zip; 7z a $ARCHIVE $NAME; else ARCHIVE=$NAME.tar.gz; tar czf $ARCHIVE $NAME; fi
+          if command -v sha256sum >/dev/null; then sha256sum $ARCHIVE > $ARCHIVE.sha256; else shasum -a 256 $ARCHIVE > $ARCHIVE.sha256; fi
       - uses: softprops/action-gh-release@v2
         with:
-          files: sarvaex-cli/dist/*.tar.gz,sarvaex-cli/dist/*.zip
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
           generate_release_notes: true
