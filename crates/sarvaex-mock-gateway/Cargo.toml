@@ -1,0 +1,20 @@
+[package]
+name = "sarvaex-mock-gateway"
+description = "In-memory mock of the SarvaEX REST gateway for tests and offline agent development"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sarvaex-mock-gateway"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "query", "macros", "ws"] }
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

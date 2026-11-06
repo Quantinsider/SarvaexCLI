@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Generate openapi.yaml for the SarvaEX public gateway.
+
+The spec is derived from API.md plus the undocumented routes found in gw-rest
+(`/v1/account/margin`, `/v1/account/margin/preview`, `/v1/market-requests`).
+It is intended for ChatGPT Actions, Postman and client codegen; the Rust SDK in
+this repo is hand-written and is the reference implementation.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import yaml
+
+ERR = {"$ref": "#/components/schemas/Error"}
+IDEMP = {
+    "name": "Idempotency-Key",
+    "in": "header",
+    "required": True,
+    "description": "Unique per logical action. Retrying with the same key returns the stored result; reusing it with a different body is a 409.",
+    "schema": {"type": "string", "maxLength": 200},
+}
+CURSOR = {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+LIMIT = lambda default, maximum: {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": maximum, "default": default}}  # noqa: E731
+TICKER = {"name": "ticker", "in": "path", "required": True, "schema": {"type": "string"}, "example": "SX-FEDDEC-26OCT-H25"}
+
+
+def resp(schema, desc="OK"):
+    return {"description": desc, "content": {"application/json": {"schema": schema}}}
+
+
+def errs(*codes):
+    names = {400: "Validation error", 401: "Unauthenticated", 403: "Missing scope", 404: "Not found", 409: "Idempotency conflict", 429: "Rate limited"}
+    return {str(c): resp(ERR, names[c]) for c in codes}
+
+
+def ref(name):
+    return {"$ref": f"#/components/schemas/{name}"}
+
+
+def page(item, key):
+    return {"type": "object", "properties": {key: {"type": "array", "items": ref(item)}, "next_cursor": {"type": "string", "description": "Empty when there are no more pages."}}, "required": [key, "next_cursor"]}
+
+
+schemas = {
+    "Error": {
+        "type": "object",
+        "properties": {"error": {"type": "object", "properties": {"code": {"type": "string", "example": "INVALID_ARGUMENT"}, "message": {"type": "string"}}, "required": ["code", "message"]}},
+        "required": ["error"],
+    },
+    "Side": {"type": "string", "enum": ["YES", "NO", "LONG", "SHORT"], "description": "YES/NO for binary contracts, LONG/SHORT for futures. Uppercase only."},
+    "Action": {"type": "string", "enum": ["BUY", "SELL"]},
+    "OrderType": {"type": "string", "enum": ["LIMIT", "MARKET"]},
+    "Tif": {"type": "string", "enum": ["GTC", "IOC", "FOK"]},
+    "Stp": {"type": "string", "enum": ["UNSPECIFIED", "TAKER_AT_CROSS", "MAKER"]},
+    "OrderStatus": {"type": "string", "enum": ["PENDING", "OPEN", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"]},
+    "PriceEncoding": {
+        "type": "object",
+        "description": "How to render price_ticks for this contract: display = ticks / divider.",
+        "properties": {"divider": {"type": "integer"}, "decimals": {"type": "integer"}, "prefix": {"type": "string"}, "suffix": {"type": "string"}, "compactThousands": {"type": "boolean"}},
+    },
+    "Contract": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "event_ticker": {"type": "string"},
+            "series_ticker": {"type": "string"},
+            "kind": {"type": "integer", "description": "1 = BINARY (YES/NO, prices in cents), 2 = FUTURES (LONG/SHORT, prices per settlement_rule.encoding)"},
+            "question": {"type": "string"},
+            "underlying": {"type": "string"},
+            "tick_size": {"type": "integer"},
+            "min_price_ticks": {"type": "integer"},
+            "max_price_ticks": {"type": "integer"},
+            "lower_bound_ticks": {"type": "integer"},
+            "upper_bound_ticks": {"type": "integer"},
+            "multiplier_micro_usdc": {"type": "integer"},
+            "divider": {"type": "integer"},
+            "multiplier_micro_per_display_unit": {"type": "integer"},
+            "tick_value_micro": {"type": "integer"},
+            "max_order_size": {"type": "integer"},
+            "position_limit_per_user": {"type": "integer"},
+            "state": {"type": "integer", "description": "1 DRAFT, 2 LISTED, 3 OPEN, 4 CLOSED, 5 RESOLVING, 6 SETTLED, 7 CANCELLED, 8 HALTED"},
+            "listed_at": {"type": ["string", "null"], "format": "date-time"},
+            "open_at": {"type": ["string", "null"], "format": "date-time"},
+            "close_at": {"type": ["string", "null"], "format": "date-time"},
+            "expected_resolution_at": {"type": ["string", "null"], "format": "date-time"},
+            "settlement_source": {"type": "string"},
+            "oracle_policy": {"type": "string"},
+            "settlement_rule": {"type": ["object", "null"], "properties": {"category": {"type": "string"}, "encoding": ref("PriceEncoding")}, "additionalProperties": True},
+            "close_global_seq": {"type": "integer"},
+            "payoff_rule": {"type": ["object", "null"], "additionalProperties": True},
+            "payout_ticks": {"type": ["integer", "null"]},
+        },
+        "required": ["ticker", "kind", "state", "tick_size", "min_price_ticks", "max_price_ticks"],
+    },
+    "Series": {"type": "object", "properties": {"series_ticker": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}}},
+    "Event": {
+        "type": "object",
+        "properties": {
+            "event_ticker": {"type": "string"},
+            "series_ticker": {"type": "string"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "expected_resolution_at": {"type": ["string", "null"], "format": "date-time"},
+            "margin_model": {},
+            "outcome_kind": {},
+            "trading_halted": {"type": "boolean"},
+            "outcome_grid": {},
+        },
+    },
+    "BookLevel": {"type": "object", "properties": {"price_ticks": {"type": "integer"}, "total_qty": {"type": "integer"}, "order_count": {"type": "integer"}}, "required": ["price_ticks", "total_qty"]},
+    "OrderBook": {
+        "type": "object",
+        "description": "Binary books are quoted in YES prices; NO price = 100 − YES.",
+        "properties": {"ticker": {"type": "string"}, "seq": {"type": "integer"}, "ts": {"type": "string", "format": "date-time"}, "bids": {"type": "array", "items": ref("BookLevel")}, "asks": {"type": "array", "items": ref("BookLevel")}},
+    },
+    "PublicFill": {
+        "type": "object",
+        "properties": {k: {"type": "string"} for k in ["fill_id", "ticker", "maker_side", "maker_action", "taker_side", "taker_action"]}
+        | {k: {"type": "integer"} for k in ["global_seq", "contract_seq", "price_ticks", "count", "maker_fee_micro_usdc", "taker_fee_micro_usdc"]}
+        | {"aggressor_side": {}, "ts": {"type": "string", "format": "date-time"}},
+    },
+    "OpenInterest": {"type": "object", "properties": {"ticker": {"type": "string"}, "total_open_long": {"type": "integer"}, "total_open_short": {"type": "integer"}, "as_of_global_seq": {"type": "integer"}, "as_of": {"type": "string", "format": "date-time"}}},
+    "NewOrder": {
+        "type": "object",
+        "required": ["client_order_id", "ticker", "side", "action", "count"],
+        "properties": {
+            "client_order_id": {"type": "string", "maxLength": 128},
+            "ticker": {"type": "string"},
+            "side": ref("Side"),
+            "action": ref("Action"),
+            "order_type": {"allOf": [ref("OrderType")], "default": "LIMIT"},
+            "price_ticks": {"type": "integer", "description": "Tick-aligned limit price. 0 / omitted for MARKET orders."},
+            "count": {"type": "integer", "minimum": 1},
+            "tif": {"allOf": [ref("Tif")], "default": "GTC"},
+            "post_only": {"type": "boolean", "default": False},
+            "reduce_only": {"type": "boolean", "default": False},
+            "stp": {"allOf": [ref("Stp")], "default": "UNSPECIFIED"},
+            "expires_at": {"type": "string", "format": "date-time"},
+        },
+    },
+    "Order": {
+        "type": "object",
+        "properties": {k: {"type": "string"} for k in ["order_id", "client_order_id", "user_id", "ticker", "side", "action", "tif", "stp", "hold_id"]}
+        | {k: {"type": "integer"} for k in ["price_ticks", "count", "filled_count", "remaining_count", "cancelled_count", "expired_count", "avg_fill_price_ticks"]}
+        | {"post_only": {"type": "boolean"}, "reduce_only": {"type": "boolean"}, "status": ref("OrderStatus"), "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": ["string", "null"], "format": "date-time"}},
+    },
+    "OrderFill": {"type": "object", "properties": {"fill_id": {"type": "string"}, "order_id": {"type": "string"}, "ticker": {"type": "string"}, "price_ticks": {"type": "integer"}, "count": {"type": "integer"}, "aggressor_side": {}, "fee_micro_usdc": {"type": "integer"}, "ts": {"type": "string", "format": "date-time"}, "seq": {"type": "integer"}}},
+    "OrderResponse": {
+        "type": "object",
+        "description": "Returned for submit and cancel. HTTP 200 does not mean filled: read order.status, filled_count, remaining_count and reject_code. Rejections return HTTP 400 with this same body.",
+        "properties": {"order": ref("Order"), "fills": {"type": "array", "items": ref("OrderFill")}, "reject_code": {"type": "string", "description": "Empty when accepted. e.g. POSITION_LIMIT_EXCEEDED, MAX_ORDER_SIZE_EXCEEDED, MARKET_NOT_AVAILABLE, ORDER_TERMINAL"}, "reject_reason": {"type": "string"}},
+        "required": ["order", "fills", "reject_code", "reject_reason"],
+    },
+    "Balance": {"type": "object", "properties": {"user_id": {"type": "string"}, "cash_micro_usdc": {"type": "integer"}, "held_micro_usdc": {"type": "integer"}, "total_micro_usdc": {"type": "integer"}}},
+    "AccountRisk": {
+        "type": "object",
+        "properties": {k: {"type": "integer"} for k in ["cash_micro_usdc", "held_micro_usdc", "total_micro_usdc", "available_collateral_micro_usdc", "equity_micro_usdc", "position_cost_micro_usdc", "realized_pnl_micro_usdc", "unrealized_pnl_micro_usdc", "open_positions", "open_orders", "as_of_global_seq"]}
+        | {"user_id": {"type": "string"}, "limits": {"type": "object", "properties": {"kyc_tier": {"type": "integer"}, "max_order_size_micro_usdc": {"type": "integer"}, "daily_loss_limit_micro_usdc": {"type": "integer"}, "per_contract_position_limit": {}}}, "calculation_basis": {}},
+    },
+    "MarginPreviewRequest": {"type": "object", "required": ["ticker", "side", "action", "price_ticks", "count"], "properties": {"ticker": {"type": "string"}, "side": ref("Side"), "action": ref("Action"), "price_ticks": {"type": "integer"}, "count": {"type": "integer"}}},
+    "MarginPreview": {"type": "object", "properties": {"event_ticker": {"type": "string"}, "eligible": {"type": "boolean"}, "ineligible_reason": {"type": "string"}, "margin_before_micro_usdc": {"type": "integer"}, "margin_after_micro_usdc": {"type": "integer"}, "delta_micro_usdc": {"type": "integer"}, "standalone_delta_micro_usdc": {"type": "integer"}}},
+    "LedgerEntry": {"type": "object", "properties": {"tx_id": {"type": "string"}, "account_code": {"type": "string"}, "direction": {"type": "string"}, "amount_micro_usdc": {"type": "integer"}, "running_balance_micro_usdc": {"type": "integer"}, "reason_code": {"type": "string"}, "posted_at": {"type": "string", "format": "date-time"}, "memo": {"type": "string"}}},
+    "PrivateFill": {"type": "object", "properties": {k: {"type": "string"} for k in ["fill_id", "ticker", "order_id", "role", "side", "action"]} | {k: {"type": "integer"} for k in ["global_seq", "contract_seq", "price_ticks", "count", "fee_micro_usdc"]} | {"aggressor_side": {}, "ts": {"type": "string", "format": "date-time"}}},
+    "Position": {"type": "object", "properties": {"user_id": {"type": "string"}, "ticker": {"type": "string"}, "net_qty": {"type": "integer"}, "avg_cost_micro_usdc": {"type": "integer"}, "realized_pnl_micro_usdc": {"type": "integer"}, "unrealized_pnl_micro_usdc": {"type": "integer"}, "updated_at": {"type": "string", "format": "date-time"}, "last_global_seq": {"type": "integer"}}},
+    "Profile": {"type": "object", "properties": {"user_id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "status": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}}, "additionalProperties": True},
+    "LoginRequest": {"type": "object", "required": ["password"], "properties": {"email": {"type": "string"}, "user_id": {"type": "string"}, "password": {"type": "string"}}, "description": "Provide email or user_id."},
+    "RegisterRequest": {"type": "object", "required": ["name", "user_id", "email", "password"], "properties": {"name": {"type": "string"}, "user_id": {"type": "string", "minLength": 3, "maxLength": 32}, "email": {"type": "string"}, "password": {"type": "string", "minLength": 8}}},
+    "LoginResponse": {"type": "object", "properties": {"token": {"type": "string"}, "token_type": {"type": "string"}, "name": {"type": "string"}, "user_id": {"type": "string"}, "email": {"type": "string"}}},
+    "ApiKey": {"type": "object", "properties": {"key_id": {"type": "string"}, "key_prefix": {"type": "string"}, "name": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string"}}, "created_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": ["string", "null"], "format": "date-time"}, "last_used_at": {"type": ["string", "null"], "format": "date-time"}, "revoked_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "ApiKeyCreateRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string", "enum": ["markets:read", "account:read", "orders:read", "fills:read", "trading:write", "websocket:read"]}, "description": "Defaults exclude trading:write and websocket:read — request them explicitly for bots."}, "expires_at": {"type": "string", "format": "date-time"}}},
+    "ApiKeyCreated": {"allOf": [ref("ApiKey")], "properties": {"key": {"type": "string", "description": "Shown once. Use as X-API-Key."}}},
+    "Rfq": {"type": "object", "properties": {k: {"type": "string"} for k in ["rfq_id", "client_rfq_id", "creator_user_id", "ticker", "side", "action", "status", "accepted_quote_id"]} | {"requested_count": {"type": "integer"}, "expires_at": {"type": "string", "format": "date-time"}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
+    "NewRfq": {"type": "object", "required": ["client_rfq_id", "ticker", "side", "action", "requested_count", "expires_at"], "properties": {"client_rfq_id": {"type": "string"}, "ticker": {"type": "string"}, "side": ref("Side"), "action": ref("Action"), "requested_count": {"type": "integer"}, "expires_at": {"type": "string", "format": "date-time"}}},
+    "Quote": {"type": "object", "properties": {k: {"type": "string"} for k in ["quote_id", "rfq_id", "maker_user_id", "status"]} | {k: {"type": "integer"} for k in ["bid_price_ticks", "offer_price_ticks", "available_count"]} | {"expires_at": {"type": "string", "format": "date-time"}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
+    "NewQuote": {"type": "object", "required": ["quote_id", "bid_price_ticks", "offer_price_ticks", "available_count", "expires_at"], "properties": {"quote_id": {"type": "string"}, "bid_price_ticks": {"type": "integer"}, "offer_price_ticks": {"type": "integer"}, "available_count": {"type": "integer"}, "expires_at": {"type": "string", "format": "date-time"}}},
+    "DemoCreditRequest": {"type": "object", "required": ["amount_micro_usdc"], "properties": {"amount_micro_usdc": {"type": "integer", "minimum": 1}, "note": {"type": "string"}}},
+    "MarketRequestCreate": {"type": "object", "required": ["question", "kind", "category"], "properties": {"question": {"type": "string", "minLength": 10, "maxLength": 300}, "kind": {"type": "string", "enum": ["BINARY", "FUTURE"]}, "category": {"type": "string", "enum": ["Economics", "Finance", "Crypto", "Commodities", "Climate", "Geopolitics / Shipping"]}, "source": {"type": "string"}}},
+}
+
+PUB = []  # no security
+AUTH = [{"ApiKeyAuth": []}, {"BearerAuth": []}]
+
+paths = {
+    "/v1/health/overview": {"get": {"operationId": "healthOverview", "tags": ["health"], "summary": "Service health summary", "security": PUB, "responses": {"200": resp({"type": "object", "additionalProperties": True})}}},
+    "/v1/auth/register": {"post": {"operationId": "register", "tags": ["auth"], "summary": "Create an account", "security": PUB, "requestBody": {"required": True, "content": {"application/json": {"schema": ref("RegisterRequest")}}}, "responses": {"200": resp(ref("LoginResponse")), **errs(400, 409)}}},
+    "/v1/auth/login": {"post": {"operationId": "login", "tags": ["auth"], "summary": "Log in with email or user_id (returns a 1h bearer token)", "security": PUB, "requestBody": {"required": True, "content": {"application/json": {"schema": ref("LoginRequest")}}}, "responses": {"200": resp(ref("LoginResponse")), **errs(400, 401)}}},
+    "/v1/account/profile": {"get": {"operationId": "getProfile", "tags": ["account"], "summary": "Authenticated profile", "responses": {"200": resp(ref("Profile")), **errs(401)}}},
+    "/v1/account/api-keys": {
+        "get": {"operationId": "listApiKeys", "tags": ["auth"], "summary": "List API keys", "responses": {"200": resp({"type": "object", "properties": {"api_keys": {"type": "array", "items": ref("ApiKey")}}}), **errs(401)}},
+        "post": {"operationId": "createApiKey", "tags": ["auth"], "summary": "Create an API key (secret shown once)", "requestBody": {"required": True, "content": {"application/json": {"schema": ref("ApiKeyCreateRequest")}}}, "responses": {"200": resp(ref("ApiKeyCreated")), **errs(400, 401)}},
+    },
+    "/v1/account/api-keys/{key_id}": {"delete": {"operationId": "revokeApiKey", "tags": ["auth"], "summary": "Revoke an API key", "parameters": [{"name": "key_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(401, 404)}}},
+    "/v1/markets": {
+        "get": {
+            "operationId": "listMarkets",
+            "tags": ["markets"],
+            "summary": "List contracts",
+            "security": PUB,
+            "parameters": [
+                {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["DRAFT", "LISTED", "OPEN", "CLOSED", "RESOLVING", "SETTLED", "CANCELLED", "HALTED"]}},
+                {"name": "kind", "in": "query", "schema": {"type": "string", "enum": ["BINARY", "FUTURES"]}},
+                {"name": "series_ticker", "in": "query", "schema": {"type": "string"}},
+                {"name": "event_ticker", "in": "query", "schema": {"type": "string"}},
+                {"name": "underlying", "in": "query", "schema": {"type": "string"}},
+                {"name": "category", "in": "query", "schema": {"type": "string"}},
+                {"name": "expected_resolution_from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                {"name": "expected_resolution_to", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                LIMIT(100, 500),
+                CURSOR,
+            ],
+            "responses": {"200": resp(page("Contract", "contracts")), **errs(400)}},
+    },
+    "/v1/markets/{ticker}": {"get": {"operationId": "getMarket", "tags": ["markets"], "summary": "Contract details (fetch before trading)", "security": PUB, "parameters": [TICKER], "responses": {"200": resp(ref("Contract")), **errs(404)}}},
+    "/v1/markets/{ticker}/orderbook": {"get": {"operationId": "getOrderbook", "tags": ["markets"], "summary": "Order book snapshot", "security": PUB, "parameters": [TICKER, {"name": "depth", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}], "responses": {"200": resp(ref("OrderBook")), **errs(404)}}},
+    "/v1/markets/{ticker}/fills": {"get": {"operationId": "getMarketFills", "tags": ["markets"], "summary": "Recent public fills", "security": PUB, "parameters": [TICKER, {"name": "from_global_seq", "in": "query", "schema": {"type": "integer"}}, {"name": "to_global_seq", "in": "query", "schema": {"type": "integer"}}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("PublicFill", "fills"))}}},
+    "/v1/markets/{ticker}/open-interest": {"get": {"operationId": "getOpenInterest", "tags": ["markets"], "summary": "Open interest", "security": PUB, "parameters": [TICKER], "responses": {"200": resp(ref("OpenInterest")), **errs(404)}}},
+    "/v1/markets/{ticker}/settlement": {"get": {"operationId": "getSettlement", "tags": ["markets"], "summary": "Settlement result", "security": PUB, "parameters": [TICKER], "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(404)}}},
+    "/v1/series": {"get": {"operationId": "listSeries", "tags": ["markets"], "summary": "List series", "security": PUB, "parameters": [LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("Series", "series"))}}},
+    "/v1/events": {"get": {"operationId": "listEvents", "tags": ["markets"], "summary": "List events", "security": PUB, "parameters": [{"name": "series_ticker", "in": "query", "schema": {"type": "string"}}, {"name": "expected_resolution_from", "in": "query", "schema": {"type": "string", "format": "date-time"}}, {"name": "expected_resolution_to", "in": "query", "schema": {"type": "string", "format": "date-time"}}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("Event", "events"))}}},
+    "/v1/events/{event_ticker}": {"get": {"operationId": "getEvent", "tags": ["markets"], "summary": "Event details", "security": PUB, "parameters": [{"name": "event_ticker", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": resp(ref("Event")), **errs(404)}}},
+    "/v1/events/{event_ticker}/resolution": {"get": {"operationId": "getResolution", "tags": ["markets"], "summary": "Resolution status", "security": PUB, "parameters": [{"name": "event_ticker", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(404)}}},
+    "/v1/orders": {
+        "get": {"operationId": "listOrders", "tags": ["orders"], "summary": "List your orders", "parameters": [{"name": "ticker", "in": "query", "schema": {"type": "string"}}, {"name": "status", "in": "query", "schema": ref("OrderStatus")}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("Order", "orders")), **errs(401, 403)}},
+        "post": {
+            "operationId": "placeOrder",
+            "tags": ["orders"],
+            "summary": "Place an order (scope trading:write)",
+            "description": "Response status 200 means accepted, not filled. Rejections are HTTP 400 with an OrderResponse body whose reject_code is set.",
+            "parameters": [IDEMP],
+            "requestBody": {"required": True, "content": {"application/json": {"schema": ref("NewOrder")}}},
+            "responses": {"200": resp(ref("OrderResponse"), "Accepted (check order.status)"), "400": resp({"oneOf": [ref("OrderResponse"), ERR]}, "Rejected (OrderResponse with reject_code) or validation error"), **errs(401, 403, 409, 429)},
+        },
+    },
+    "/v1/orders/{order_id}": {"get": {"operationId": "getOrder", "tags": ["orders"], "summary": "Get an order", "parameters": [{"name": "order_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": resp(ref("Order")), **errs(401, 404)}}},
+    "/v1/orders/{order_id}/cancel": {"post": {"operationId": "cancelOrder", "tags": ["orders"], "summary": "Cancel an order (scope trading:write)", "parameters": [{"name": "order_id", "in": "path", "required": True, "schema": {"type": "string"}}, IDEMP], "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}, "responses": {"200": resp(ref("OrderResponse")), "400": resp(ref("OrderResponse"), "Already terminal (reject_code ORDER_TERMINAL)"), **errs(401, 403, 404, 409)}}},
+    "/v1/account/balance": {"get": {"operationId": "getBalance", "tags": ["account"], "summary": "Balance", "responses": {"200": resp(ref("Balance")), **errs(401, 403)}}},
+    "/v1/account/risk": {"get": {"operationId": "getAccountRisk", "tags": ["account"], "summary": "Risk summary and limits", "responses": {"200": resp(ref("AccountRisk")), **errs(401, 403)}}},
+    "/v1/account/margin": {"get": {"operationId": "getAccountMargin", "tags": ["account"], "summary": "Portfolio margin breakdown by event", "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(401, 403)}}},
+    "/v1/account/margin/preview": {"post": {"operationId": "previewMargin", "tags": ["account"], "summary": "What-if margin impact of an order (read-only, no Idempotency-Key)", "requestBody": {"required": True, "content": {"application/json": {"schema": ref("MarginPreviewRequest")}}}, "responses": {"200": resp(ref("MarginPreview")), **errs(400, 401, 403)}}},
+    "/v1/account/history": {"get": {"operationId": "getAccountHistory", "tags": ["account"], "summary": "Ledger entries", "parameters": [LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("LedgerEntry", "entries")), **errs(401, 403)}}},
+    "/v1/account/fills": {"get": {"operationId": "getAccountFills", "tags": ["account"], "summary": "Your fills", "parameters": [{"name": "ticker", "in": "query", "schema": {"type": "string"}}, {"name": "order_id", "in": "query", "schema": {"type": "string"}}, {"name": "from_global_seq", "in": "query", "schema": {"type": "integer"}}, {"name": "to_global_seq", "in": "query", "schema": {"type": "integer"}}, {"name": "from_time", "in": "query", "schema": {"type": "string", "format": "date-time"}}, {"name": "to_time", "in": "query", "schema": {"type": "string", "format": "date-time"}}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("PrivateFill", "fills")), **errs(401, 403)}}},
+    "/v1/positions": {"get": {"operationId": "listPositions", "tags": ["account"], "summary": "Positions", "parameters": [{"name": "include_closed", "in": "query", "schema": {"type": "boolean", "default": False}}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("Position", "positions")), **errs(401, 403)}}},
+    "/v1/positions/{ticker}": {"get": {"operationId": "getPosition", "tags": ["account"], "summary": "Position for one contract", "parameters": [TICKER], "responses": {"200": resp(ref("Position")), **errs(401, 404)}}},
+    "/v1/demo/deposits/credit": {"post": {"operationId": "creditDemoFunds", "tags": ["account"], "summary": "Demo/devnet only: credit play money", "parameters": [IDEMP], "requestBody": {"required": True, "content": {"application/json": {"schema": ref("DemoCreditRequest")}}}, "responses": {"200": resp({"type": "object", "properties": {"ok": {"type": "boolean"}, "balance": ref("Balance")}}), **errs(400, 401, 403, 409)}}},
+    "/v1/rfqs": {"post": {"operationId": "createRfq", "tags": ["rfq"], "summary": "Create an RFQ", "parameters": [IDEMP], "requestBody": {"required": True, "content": {"application/json": {"schema": ref("NewRfq")}}}, "responses": {"200": resp({"type": "object", "properties": {"rfq": ref("Rfq")}}), **errs(400, 401, 403, 409)}}},
+    "/v1/rfqs/{rfq_id}": {"get": {"operationId": "getRfq", "tags": ["rfq"], "summary": "Get an RFQ", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": resp(ref("Rfq")), **errs(401, 404)}}},
+    "/v1/rfqs/{rfq_id}/quotes": {
+        "get": {"operationId": "listRfqQuotes", "tags": ["rfq"], "summary": "List quotes", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}, LIMIT(100, 500), CURSOR], "responses": {"200": resp(page("Quote", "quotes")), **errs(401, 404)}},
+        "post": {"operationId": "submitRfqQuote", "tags": ["rfq"], "summary": "Submit a quote", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}, IDEMP], "requestBody": {"required": True, "content": {"application/json": {"schema": ref("NewQuote")}}}, "responses": {"200": resp({"type": "object", "properties": {"quote": ref("Quote")}}), **errs(400, 401, 403, 409)}},
+    },
+    "/v1/rfqs/{rfq_id}/quotes/{quote_id}/accept": {"post": {"operationId": "acceptRfqQuote", "tags": ["rfq"], "summary": "Accept a quote", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "quote_id", "in": "path", "required": True, "schema": {"type": "string"}}, IDEMP], "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(400, 401, 403, 404, 409)}}},
+    "/v1/rfqs/{rfq_id}/quotes/{quote_id}/cancel": {"post": {"operationId": "cancelRfqQuote", "tags": ["rfq"], "summary": "Cancel a quote", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "quote_id", "in": "path", "required": True, "schema": {"type": "string"}}, IDEMP], "responses": {"200": resp({"type": "object", "properties": {"quote": ref("Quote")}}), **errs(400, 401, 403, 404, 409)}}},
+    "/v1/rfqs/{rfq_id}/cancel": {"post": {"operationId": "cancelRfq", "tags": ["rfq"], "summary": "Cancel an RFQ", "parameters": [{"name": "rfq_id", "in": "path", "required": True, "schema": {"type": "string"}}, IDEMP], "responses": {"200": resp({"type": "object", "properties": {"rfq": ref("Rfq")}}), **errs(400, 401, 403, 404, 409)}}},
+    "/v1/market-requests": {
+        "get": {"operationId": "listMarketRequests", "tags": ["markets"], "summary": "Your proposed markets", "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(401)}},
+        "post": {"operationId": "createMarketRequest", "tags": ["markets"], "summary": "Propose a new market", "requestBody": {"required": True, "content": {"application/json": {"schema": ref("MarketRequestCreate")}}}, "responses": {"200": resp({"type": "object", "additionalProperties": True}), **errs(400, 401)}},
+    },
+}
+
+spec = {
+    "openapi": "3.1.0",
+    "info": {
+        "title": "SarvaEX Public API",
+        "version": "1.0.0",
+        "description": (
+            "Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout; "
+            "futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. "
+            "Every POST that changes state requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential."
+        ),
+        "contact": {"name": "SarvaEX", "url": "https://sarvaex.com"},
+    },
+    "servers": [{"url": "https://api.sarvaex.com", "description": "Production"}, {"url": "http://localhost:18080", "description": "Local docker-compose"}],
+    "tags": [{"name": "markets"}, {"name": "orders"}, {"name": "account"}, {"name": "auth"}, {"name": "rfq"}, {"name": "health"}],
+    "security": AUTH,
+    "paths": paths,
+    "components": {
+        "securitySchemes": {
+            "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key", "description": "API key `svx_live_…`. Scopes: markets:read, account:read, orders:read, fills:read, trading:write, websocket:read."},
+            "BearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT", "description": "1-hour token from /v1/auth/login."},
+        },
+        "schemas": schemas,
+    },
+}
+
+out = Path(sys.argv[1] if len(sys.argv) > 1 else "openapi.yaml")
+out.write_text(yaml.safe_dump(spec, sort_keys=False, allow_unicode=True, width=120))
+print(f"wrote {out} ({len(paths)} paths, {len(schemas)} schemas)")

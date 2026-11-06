@@ -1,0 +1,2287 @@
+openapi: 3.1.0
+info:
+  title: SarvaEX Public API
+  version: 1.0.0
+  description: 'Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout;
+    futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. Every POST that changes state
+    requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential.'
+  contact:
+    name: SarvaEX
+    url: https://sarvaex.com
+servers:
+- url: https://api.sarvaex.com
+  description: Production
+- url: http://localhost:18080
+  description: Local docker-compose
+tags:
+- name: markets
+- name: orders
+- name: account
+- name: auth
+- name: rfq
+- name: health
+security:
+- ApiKeyAuth: []
+- BearerAuth: []
+paths:
+  /v1/health/overview:
+    get:
+      operationId: healthOverview
+      tags:
+      - health
+      summary: Service health summary
+      security: &id001 []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/auth/register:
+    post:
+      operationId: register
+      tags:
+      - auth
+      summary: Create an account
+      security: *id001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: &id002
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/auth/login:
+    post:
+      operationId: login
+      tags:
+      - auth
+      summary: Log in with email or user_id (returns a 1h bearer token)
+      security: *id001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/profile:
+    get:
+      operationId: getProfile
+      tags:
+      - account
+      summary: Authenticated profile
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/api-keys:
+    get:
+      operationId: listApiKeys
+      tags:
+      - auth
+      summary: List API keys
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKey'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+    post:
+      operationId: createApiKey
+      tags:
+      - auth
+      summary: Create an API key (secret shown once)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreateRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/api-keys/{key_id}:
+    delete:
+      operationId: revokeApiKey
+      tags:
+      - auth
+      summary: Revoke an API key
+      parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets:
+    get:
+      operationId: listMarkets
+      tags:
+      - markets
+      summary: List contracts
+      security: *id001
+      parameters:
+      - name: state
+        in: query
+        schema:
+          type: string
+          enum:
+          - DRAFT
+          - LISTED
+          - OPEN
+          - CLOSED
+          - RESOLVING
+          - SETTLED
+          - CANCELLED
+          - HALTED
+      - name: kind
+        in: query
+        schema:
+          type: string
+          enum:
+          - BINARY
+          - FUTURES
+      - name: series_ticker
+        in: query
+        schema:
+          type: string
+      - name: event_ticker
+        in: query
+        schema:
+          type: string
+      - name: underlying
+        in: query
+        schema:
+          type: string
+      - name: category
+        in: query
+        schema:
+          type: string
+      - name: expected_resolution_from
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: expected_resolution_to
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - &id004
+        name: cursor
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contracts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Contract'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - contracts
+                - next_cursor
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}:
+    get:
+      operationId: getMarket
+      tags:
+      - markets
+      summary: Contract details (fetch before trading)
+      security: *id001
+      parameters:
+      - &id003
+        name: ticker
+        in: path
+        required: true
+        schema:
+          type: string
+        example: SX-FEDDEC-26OCT-H25
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/orderbook:
+    get:
+      operationId: getOrderbook
+      tags:
+      - markets
+      summary: Order book snapshot
+      security: *id001
+      parameters:
+      - *id003
+      - name: depth
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderBook'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/fills:
+    get:
+      operationId: getMarketFills
+      tags:
+      - markets
+      summary: Recent public fills
+      security: *id001
+      parameters:
+      - *id003
+      - name: from_global_seq
+        in: query
+        schema:
+          type: integer
+      - name: to_global_seq
+        in: query
+        schema:
+          type: integer
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fills:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PublicFill'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - fills
+                - next_cursor
+  /v1/markets/{ticker}/open-interest:
+    get:
+      operationId: getOpenInterest
+      tags:
+      - markets
+      summary: Open interest
+      security: *id001
+      parameters:
+      - *id003
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenInterest'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/settlement:
+    get:
+      operationId: getSettlement
+      tags:
+      - markets
+      summary: Settlement result
+      security: *id001
+      parameters:
+      - *id003
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/series:
+    get:
+      operationId: listSeries
+      tags:
+      - markets
+      summary: List series
+      security: *id001
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  series:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Series'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - series
+                - next_cursor
+  /v1/events:
+    get:
+      operationId: listEvents
+      tags:
+      - markets
+      summary: List events
+      security: *id001
+      parameters:
+      - name: series_ticker
+        in: query
+        schema:
+          type: string
+      - name: expected_resolution_from
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: expected_resolution_to
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Event'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - events
+                - next_cursor
+  /v1/events/{event_ticker}:
+    get:
+      operationId: getEvent
+      tags:
+      - markets
+      summary: Event details
+      security: *id001
+      parameters:
+      - name: event_ticker
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/events/{event_ticker}/resolution:
+    get:
+      operationId: getResolution
+      tags:
+      - markets
+      summary: Resolution status
+      security: *id001
+      parameters:
+      - name: event_ticker
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders:
+    get:
+      operationId: listOrders
+      tags:
+      - orders
+      summary: List your orders
+      parameters:
+      - name: ticker
+        in: query
+        schema:
+          type: string
+      - name: status
+        in: query
+        schema:
+          $ref: '#/components/schemas/OrderStatus'
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - orders
+                - next_cursor
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+    post:
+      operationId: placeOrder
+      tags:
+      - orders
+      summary: Place an order (scope trading:write)
+      description: Response status 200 means accepted, not filled. Rejections are HTTP 400 with an OrderResponse body whose
+        reject_code is set.
+      parameters:
+      - &id005
+        name: Idempotency-Key
+        in: header
+        required: true
+        description: Unique per logical action. Retrying with the same key returns the stored result; reusing it with a different
+          body is a 409.
+        schema:
+          type: string
+          maxLength: 200
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewOrder'
+      responses:
+        '200':
+          description: Accepted (check order.status)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          description: Rejected (OrderResponse with reject_code) or validation error
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/OrderResponse'
+                - *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/{order_id}:
+    get:
+      operationId: getOrder
+      tags:
+      - orders
+      summary: Get an order
+      parameters:
+      - name: order_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/{order_id}/cancel:
+    post:
+      operationId: cancelOrder
+      tags:
+      - orders
+      summary: Cancel an order (scope trading:write)
+      parameters:
+      - name: order_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          description: Already terminal (reject_code ORDER_TERMINAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/balance:
+    get:
+      operationId: getBalance
+      tags:
+      - account
+      summary: Balance
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/risk:
+    get:
+      operationId: getAccountRisk
+      tags:
+      - account
+      summary: Risk summary and limits
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountRisk'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/margin:
+    get:
+      operationId: getAccountMargin
+      tags:
+      - account
+      summary: Portfolio margin breakdown by event
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/margin/preview:
+    post:
+      operationId: previewMargin
+      tags:
+      - account
+      summary: What-if margin impact of an order (read-only, no Idempotency-Key)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarginPreviewRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarginPreview'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/history:
+    get:
+      operationId: getAccountHistory
+      tags:
+      - account
+      summary: Ledger entries
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LedgerEntry'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - entries
+                - next_cursor
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/fills:
+    get:
+      operationId: getAccountFills
+      tags:
+      - account
+      summary: Your fills
+      parameters:
+      - name: ticker
+        in: query
+        schema:
+          type: string
+      - name: order_id
+        in: query
+        schema:
+          type: string
+      - name: from_global_seq
+        in: query
+        schema:
+          type: integer
+      - name: to_global_seq
+        in: query
+        schema:
+          type: integer
+      - name: from_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: to_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fills:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PrivateFill'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - fills
+                - next_cursor
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/positions:
+    get:
+      operationId: listPositions
+      tags:
+      - account
+      summary: Positions
+      parameters:
+      - name: include_closed
+        in: query
+        schema:
+          type: boolean
+          default: false
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  positions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Position'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - positions
+                - next_cursor
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/positions/{ticker}:
+    get:
+      operationId: getPosition
+      tags:
+      - account
+      summary: Position for one contract
+      parameters:
+      - *id003
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Position'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/demo/deposits/credit:
+    post:
+      operationId: creditDemoFunds
+      tags:
+      - account
+      summary: 'Demo/devnet only: credit play money'
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemoCreditRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  balance:
+                    $ref: '#/components/schemas/Balance'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs:
+    post:
+      operationId: createRfq
+      tags:
+      - rfq
+      summary: Create an RFQ
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewRfq'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rfq:
+                    $ref: '#/components/schemas/Rfq'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs/{rfq_id}:
+    get:
+      operationId: getRfq
+      tags:
+      - rfq
+      summary: Get an RFQ
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rfq'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs/{rfq_id}/quotes:
+    get:
+      operationId: listRfqQuotes
+      tags:
+      - rfq
+      summary: List quotes
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quotes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Quote'
+                  next_cursor:
+                    type: string
+                    description: Empty when there are no more pages.
+                required:
+                - quotes
+                - next_cursor
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+    post:
+      operationId: submitRfqQuote
+      tags:
+      - rfq
+      summary: Submit a quote
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewQuote'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quote:
+                    $ref: '#/components/schemas/Quote'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs/{rfq_id}/quotes/{quote_id}/accept:
+    post:
+      operationId: acceptRfqQuote
+      tags:
+      - rfq
+      summary: Accept a quote
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: quote_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs/{rfq_id}/quotes/{quote_id}/cancel:
+    post:
+      operationId: cancelRfqQuote
+      tags:
+      - rfq
+      summary: Cancel a quote
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: quote_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quote:
+                    $ref: '#/components/schemas/Quote'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/rfqs/{rfq_id}/cancel:
+    post:
+      operationId: cancelRfq
+      tags:
+      - rfq
+      summary: Cancel an RFQ
+      parameters:
+      - name: rfq_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rfq:
+                    $ref: '#/components/schemas/Rfq'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/market-requests:
+    get:
+      operationId: listMarketRequests
+      tags:
+      - markets
+      summary: Your proposed markets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+    post:
+      operationId: createMarketRequest
+      tags:
+      - markets
+      summary: Propose a new market
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarketRequestCreate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 'API key `svx_live_…`. Scopes: markets:read, account:read, orders:read, fills:read, trading:write, websocket:read.'
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 1-hour token from /v1/auth/login.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: INVALID_ARGUMENT
+            message:
+              type: string
+          required:
+          - code
+          - message
+      required:
+      - error
+    Side:
+      type: string
+      enum:
+      - 'YES'
+      - 'NO'
+      - LONG
+      - SHORT
+      description: YES/NO for binary contracts, LONG/SHORT for futures. Uppercase only.
+    Action:
+      type: string
+      enum:
+      - BUY
+      - SELL
+    OrderType:
+      type: string
+      enum:
+      - LIMIT
+      - MARKET
+    Tif:
+      type: string
+      enum:
+      - GTC
+      - IOC
+      - FOK
+    Stp:
+      type: string
+      enum:
+      - UNSPECIFIED
+      - TAKER_AT_CROSS
+      - MAKER
+    OrderStatus:
+      type: string
+      enum:
+      - PENDING
+      - OPEN
+      - PARTIAL
+      - FILLED
+      - CANCELLED
+      - REJECTED
+      - EXPIRED
+    PriceEncoding:
+      type: object
+      description: 'How to render price_ticks for this contract: display = ticks / divider.'
+      properties:
+        divider:
+          type: integer
+        decimals:
+          type: integer
+        prefix:
+          type: string
+        suffix:
+          type: string
+        compactThousands:
+          type: boolean
+    Contract:
+      type: object
+      properties:
+        ticker:
+          type: string
+        event_ticker:
+          type: string
+        series_ticker:
+          type: string
+        kind:
+          type: integer
+          description: 1 = BINARY (YES/NO, prices in cents), 2 = FUTURES (LONG/SHORT, prices per settlement_rule.encoding)
+        question:
+          type: string
+        underlying:
+          type: string
+        tick_size:
+          type: integer
+        min_price_ticks:
+          type: integer
+        max_price_ticks:
+          type: integer
+        lower_bound_ticks:
+          type: integer
+        upper_bound_ticks:
+          type: integer
+        multiplier_micro_usdc:
+          type: integer
+        divider:
+          type: integer
+        multiplier_micro_per_display_unit:
+          type: integer
+        tick_value_micro:
+          type: integer
+        max_order_size:
+          type: integer
+        position_limit_per_user:
+          type: integer
+        state:
+          type: integer
+          description: 1 DRAFT, 2 LISTED, 3 OPEN, 4 CLOSED, 5 RESOLVING, 6 SETTLED, 7 CANCELLED, 8 HALTED
+        listed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        open_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        close_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        expected_resolution_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        settlement_source:
+          type: string
+        oracle_policy:
+          type: string
+        settlement_rule:
+          type:
+          - object
+          - 'null'
+          properties:
+            category:
+              type: string
+            encoding:
+              $ref: '#/components/schemas/PriceEncoding'
+          additionalProperties: true
+        close_global_seq:
+          type: integer
+        payoff_rule:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        payout_ticks:
+          type:
+          - integer
+          - 'null'
+      required:
+      - ticker
+      - kind
+      - state
+      - tick_size
+      - min_price_ticks
+      - max_price_ticks
+    Series:
+      type: object
+      properties:
+        series_ticker:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+    Event:
+      type: object
+      properties:
+        event_ticker:
+          type: string
+        series_ticker:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        expected_resolution_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        margin_model: {}
+        outcome_kind: {}
+        trading_halted:
+          type: boolean
+        outcome_grid: {}
+    BookLevel:
+      type: object
+      properties:
+        price_ticks:
+          type: integer
+        total_qty:
+          type: integer
+        order_count:
+          type: integer
+      required:
+      - price_ticks
+      - total_qty
+    OrderBook:
+      type: object
+      description: Binary books are quoted in YES prices; NO price = 100 − YES.
+      properties:
+        ticker:
+          type: string
+        seq:
+          type: integer
+        ts:
+          type: string
+          format: date-time
+        bids:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookLevel'
+        asks:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookLevel'
+    PublicFill:
+      type: object
+      properties:
+        fill_id:
+          type: string
+        ticker:
+          type: string
+        maker_side:
+          type: string
+        maker_action:
+          type: string
+        taker_side:
+          type: string
+        taker_action:
+          type: string
+        global_seq:
+          type: integer
+        contract_seq:
+          type: integer
+        price_ticks:
+          type: integer
+        count:
+          type: integer
+        maker_fee_micro_usdc:
+          type: integer
+        taker_fee_micro_usdc:
+          type: integer
+        aggressor_side: {}
+        ts:
+          type: string
+          format: date-time
+    OpenInterest:
+      type: object
+      properties:
+        ticker:
+          type: string
+        total_open_long:
+          type: integer
+        total_open_short:
+          type: integer
+        as_of_global_seq:
+          type: integer
+        as_of:
+          type: string
+          format: date-time
+    NewOrder:
+      type: object
+      required:
+      - client_order_id
+      - ticker
+      - side
+      - action
+      - count
+      properties:
+        client_order_id:
+          type: string
+          maxLength: 128
+        ticker:
+          type: string
+        side:
+          $ref: '#/components/schemas/Side'
+        action:
+          $ref: '#/components/schemas/Action'
+        order_type:
+          allOf:
+          - $ref: '#/components/schemas/OrderType'
+          default: LIMIT
+        price_ticks:
+          type: integer
+          description: Tick-aligned limit price. 0 / omitted for MARKET orders.
+        count:
+          type: integer
+          minimum: 1
+        tif:
+          allOf:
+          - $ref: '#/components/schemas/Tif'
+          default: GTC
+        post_only:
+          type: boolean
+          default: false
+        reduce_only:
+          type: boolean
+          default: false
+        stp:
+          allOf:
+          - $ref: '#/components/schemas/Stp'
+          default: UNSPECIFIED
+        expires_at:
+          type: string
+          format: date-time
+    Order:
+      type: object
+      properties:
+        order_id:
+          type: string
+        client_order_id:
+          type: string
+        user_id:
+          type: string
+        ticker:
+          type: string
+        side:
+          type: string
+        action:
+          type: string
+        tif:
+          type: string
+        stp:
+          type: string
+        hold_id:
+          type: string
+        price_ticks:
+          type: integer
+        count:
+          type: integer
+        filled_count:
+          type: integer
+        remaining_count:
+          type: integer
+        cancelled_count:
+          type: integer
+        expired_count:
+          type: integer
+        avg_fill_price_ticks:
+          type: integer
+        post_only:
+          type: boolean
+        reduce_only:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    OrderFill:
+      type: object
+      properties:
+        fill_id:
+          type: string
+        order_id:
+          type: string
+        ticker:
+          type: string
+        price_ticks:
+          type: integer
+        count:
+          type: integer
+        aggressor_side: {}
+        fee_micro_usdc:
+          type: integer
+        ts:
+          type: string
+          format: date-time
+        seq:
+          type: integer
+    OrderResponse:
+      type: object
+      description: 'Returned for submit and cancel. HTTP 200 does not mean filled: read order.status, filled_count, remaining_count
+        and reject_code. Rejections return HTTP 400 with this same body.'
+      properties:
+        order:
+          $ref: '#/components/schemas/Order'
+        fills:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderFill'
+        reject_code:
+          type: string
+          description: Empty when accepted. e.g. POSITION_LIMIT_EXCEEDED, MAX_ORDER_SIZE_EXCEEDED, MARKET_NOT_AVAILABLE, ORDER_TERMINAL
+        reject_reason:
+          type: string
+      required:
+      - order
+      - fills
+      - reject_code
+      - reject_reason
+    Balance:
+      type: object
+      properties:
+        user_id:
+          type: string
+        cash_micro_usdc:
+          type: integer
+        held_micro_usdc:
+          type: integer
+        total_micro_usdc:
+          type: integer
+    AccountRisk:
+      type: object
+      properties:
+        cash_micro_usdc:
+          type: integer
+        held_micro_usdc:
+          type: integer
+        total_micro_usdc:
+          type: integer
+        available_collateral_micro_usdc:
+          type: integer
+        equity_micro_usdc:
+          type: integer
+        position_cost_micro_usdc:
+          type: integer
+        realized_pnl_micro_usdc:
+          type: integer
+        unrealized_pnl_micro_usdc:
+          type: integer
+        open_positions:
+          type: integer
+        open_orders:
+          type: integer
+        as_of_global_seq:
+          type: integer
+        user_id:
+          type: string
+        limits:
+          type: object
+          properties:
+            kyc_tier:
+              type: integer
+            max_order_size_micro_usdc:
+              type: integer
+            daily_loss_limit_micro_usdc:
+              type: integer
+            per_contract_position_limit: {}
+        calculation_basis: {}
+    MarginPreviewRequest:
+      type: object
+      required:
+      - ticker
+      - side
+      - action
+      - price_ticks
+      - count
+      properties:
+        ticker:
+          type: string
+        side:
+          $ref: '#/components/schemas/Side'
+        action:
+          $ref: '#/components/schemas/Action'
+        price_ticks:
+          type: integer
+        count:
+          type: integer
+    MarginPreview:
+      type: object
+      properties:
+        event_ticker:
+          type: string
+        eligible:
+          type: boolean
+        ineligible_reason:
+          type: string
+        margin_before_micro_usdc:
+          type: integer
+        margin_after_micro_usdc:
+          type: integer
+        delta_micro_usdc:
+          type: integer
+        standalone_delta_micro_usdc:
+          type: integer
+    LedgerEntry:
+      type: object
+      properties:
+        tx_id:
+          type: string
+        account_code:
+          type: string
+        direction:
+          type: string
+        amount_micro_usdc:
+          type: integer
+        running_balance_micro_usdc:
+          type: integer
+        reason_code:
+          type: string
+        posted_at:
+          type: string
+          format: date-time
+        memo:
+          type: string
+    PrivateFill:
+      type: object
+      properties:
+        fill_id:
+          type: string
+        ticker:
+          type: string
+        order_id:
+          type: string
+        role:
+          type: string
+        side:
+          type: string
+        action:
+          type: string
+        global_seq:
+          type: integer
+        contract_seq:
+          type: integer
+        price_ticks:
+          type: integer
+        count:
+          type: integer
+        fee_micro_usdc:
+          type: integer
+        aggressor_side: {}
+        ts:
+          type: string
+          format: date-time
+    Position:
+      type: object
+      properties:
+        user_id:
+          type: string
+        ticker:
+          type: string
+        net_qty:
+          type: integer
+        avg_cost_micro_usdc:
+          type: integer
+        realized_pnl_micro_usdc:
+          type: integer
+        unrealized_pnl_micro_usdc:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+        last_global_seq:
+          type: integer
+    Profile:
+      type: object
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    LoginRequest:
+      type: object
+      required:
+      - password
+      properties:
+        email:
+          type: string
+        user_id:
+          type: string
+        password:
+          type: string
+      description: Provide email or user_id.
+    RegisterRequest:
+      type: object
+      required:
+      - name
+      - user_id
+      - email
+      - password
+      properties:
+        name:
+          type: string
+        user_id:
+          type: string
+          minLength: 3
+          maxLength: 32
+        email:
+          type: string
+        password:
+          type: string
+          minLength: 8
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        token_type:
+          type: string
+        name:
+          type: string
+        user_id:
+          type: string
+        email:
+          type: string
+    ApiKey:
+      type: object
+      properties:
+        key_id:
+          type: string
+        key_prefix:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        last_used_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        revoked_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    ApiKeyCreateRequest:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum:
+            - markets:read
+            - account:read
+            - orders:read
+            - fills:read
+            - trading:write
+            - websocket:read
+          description: Defaults exclude trading:write and websocket:read — request them explicitly for bots.
+        expires_at:
+          type: string
+          format: date-time
+    ApiKeyCreated:
+      allOf:
+      - $ref: '#/components/schemas/ApiKey'
+      properties:
+        key:
+          type: string
+          description: Shown once. Use as X-API-Key.
+    Rfq:
+      type: object
+      properties:
+        rfq_id:
+          type: string
+        client_rfq_id:
+          type: string
+        creator_user_id:
+          type: string
+        ticker:
+          type: string
+        side:
+          type: string
+        action:
+          type: string
+        status:
+          type: string
+        accepted_quote_id:
+          type: string
+        requested_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NewRfq:
+      type: object
+      required:
+      - client_rfq_id
+      - ticker
+      - side
+      - action
+      - requested_count
+      - expires_at
+      properties:
+        client_rfq_id:
+          type: string
+        ticker:
+          type: string
+        side:
+          $ref: '#/components/schemas/Side'
+        action:
+          $ref: '#/components/schemas/Action'
+        requested_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+    Quote:
+      type: object
+      properties:
+        quote_id:
+          type: string
+        rfq_id:
+          type: string
+        maker_user_id:
+          type: string
+        status:
+          type: string
+        bid_price_ticks:
+          type: integer
+        offer_price_ticks:
+          type: integer
+        available_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NewQuote:
+      type: object
+      required:
+      - quote_id
+      - bid_price_ticks
+      - offer_price_ticks
+      - available_count
+      - expires_at
+      properties:
+        quote_id:
+          type: string
+        bid_price_ticks:
+          type: integer
+        offer_price_ticks:
+          type: integer
+        available_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+    DemoCreditRequest:
+      type: object
+      required:
+      - amount_micro_usdc
+      properties:
+        amount_micro_usdc:
+          type: integer
+          minimum: 1
+        note:
+          type: string
+    MarketRequestCreate:
+      type: object
+      required:
+      - question
+      - kind
+      - category
+      properties:
+        question:
+          type: string
+          minLength: 10
+          maxLength: 300
+        kind:
+          type: string
+          enum:
+          - BINARY
+          - FUTURE
+        category:
+          type: string
+          enum:
+          - Economics
+          - Finance
+          - Crypto
+          - Commodities
+          - Climate
+          - Geopolitics / Shipping
+        source:
+          type: string

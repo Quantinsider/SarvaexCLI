@@ -1,0 +1,29 @@
+[package]
+name = "sarvaex-sdk"
+description = "Typed Rust client for the SarvaEX prediction-market exchange REST and WebSocket API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+url.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+futures.workspace = true
+schemars.workspace = true
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+sarvaex-mock-gateway.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }

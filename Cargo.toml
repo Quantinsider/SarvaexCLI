@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/sarvaex-sdk", "crates/sarvaex-cli", "crates/sarvaex-mcp", "crates/sarvaex-mock-gateway"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/Rustix69/SarvexBackend"
+authors = ["SarvaEX"]
+
+[workspace.dependencies]
+sarvaex-sdk = { path = "crates/sarvaex-sdk", version = "0.1.0" }
+sarvaex-mcp = { path = "crates/sarvaex-mcp", version = "0.1.0" }
+sarvaex-mock-gateway = { path = "crates/sarvaex-mock-gateway" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util", "signal", "fs"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2", "charset", "form", "query"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+futures = "0.3"
+schemars = "1"
+http = "1"
+base64 = "0.23"
+sha2 = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3

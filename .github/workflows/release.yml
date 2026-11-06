@@ -1,0 +1,49 @@
+name: release
+on:
+  push:
+    tags: ["sarvaex-v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: sarvaex-cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sarvaex-cli
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: cargo build --release -p sarvaex-cli --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=sarvaex; [[ "${{ runner.os }}" == "Windows" ]] && BIN=sarvaex.exe
+          NAME=sarvaex-${GITHUB_REF_NAME#sarvaex-v}-${{ matrix.target }}
+          mkdir -p dist/$NAME
+          cp target/${{ matrix.target }}/release/$BIN README.md SKILL.md dist/$NAME/
+          cd dist && if [[ "${{ runner.os }}" == "Windows" ]]; then 7z a $NAME.zip $NAME; else tar czf $NAME.tar.gz $NAME; fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sarvaex-cli/dist/*.tar.gz,sarvaex-cli/dist/*.zip
+          generate_release_notes: true

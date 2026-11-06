@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "sarvaex": {
+      "command": "sarvaex",
+      "args": ["mcp", "stdio"],
+      "env": {
+        "SARVAEX_API_KEY": "svx_live_REPLACE_ME",
+        "SARVAEX_MAX_ORDER_NOTIONAL_USDC": "500"
+      }
+    }
+  }
+}

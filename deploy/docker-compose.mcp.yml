@@ -1,0 +1,55 @@
+# Hosted MCP server for Claude.ai / ChatGPT connectors.
+#
+#   export SARVAEX_MCP_SECRET=$(openssl rand -hex 32)      # keep this; it encrypts stored API keys
+#   docker compose -f deploy/docker-compose.mcp.yml up -d
+#
+# Put TLS in front (Caddy below, or an ALB). Both Claude.ai and ChatGPT require https.
+services:
+  mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: sarvaex/sarvaex:latest
+    restart: unless-stopped
+    command:
+      - mcp
+      - serve
+      - --bind
+      - 0.0.0.0:8787
+      - --public-url
+      - ${SARVAEX_MCP_PUBLIC_URL:-https://mcp.sarvaex.com}
+      - --state-dir
+      - /var/lib/sarvaex-mcp
+    environment:
+      SARVAEX_BASE_URL: ${SARVAEX_BASE_URL:-https://api.sarvaex.com}
+      SARVAEX_MCP_SECRET: ${SARVAEX_MCP_SECRET:?set SARVAEX_MCP_SECRET to a 32-byte hex/base64 secret}
+      RUST_LOG: info
+    volumes:
+      - mcp-state:/var/lib/sarvaex-mcp
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - mcp
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SARVAEX_MCP_DOMAIN: ${SARVAEX_MCP_DOMAIN:-mcp.sarvaex.com}
+    command: ["caddy", "reverse-proxy", "--from", "{$SARVAEX_MCP_DOMAIN}", "--to", "mcp:8787"]
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  mcp-state:
+  caddy-data:
+  caddy-config:

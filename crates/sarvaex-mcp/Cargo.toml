@@ -1,0 +1,38 @@
+[package]
+name = "sarvaex-mcp"
+description = "Model Context Protocol server exposing the SarvaEX exchange to Claude, ChatGPT and other AI agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sarvaex-sdk.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+futures.workspace = true
+schemars.workspace = true
+http.workspace = true
+url.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+rmcp = { version = "3.8", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+axum = { version = "0.8", features = ["form", "query", "json", "macros"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+tokio-util = "0.7"
+rusqlite = { version = "0.41", features = ["bundled"] }
+chacha20poly1305 = { version = "0.11", features = ["getrandom"] }
+html-escape = "0.2"
+
+[dev-dependencies]
+sarvaex-mock-gateway.workspace = true
+tokio = { version = "1", features = ["full"] }
