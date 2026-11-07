@@ -5,7 +5,16 @@ on:
 permissions:
   contents: write
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the Cargo version
+        run: |
+          V=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then echo "Tag $GITHUB_REF_NAME does not match Cargo version $V"; exit 1; fi
   build:
+    needs: verify
     strategy:
       matrix:
         include:
