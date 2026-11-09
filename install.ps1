@@ -1,8 +1,8 @@
 # Installs the sarvaex CLI on Windows:
-#   irm https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Quantinsider/SarvaexCLI/main/install.ps1 | iex
 # Pin a version with $env:SARVAEX_VERSION = "0.1.0".
 $ErrorActionPreference = "Stop"
-$repo = "Rustix69/SarvaexCLI"
+$repo = "Quantinsider/SarvaexCLI"
 $version = $env:SARVAEX_VERSION
 if (-not $version) {
   $version = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name.TrimStart("v")

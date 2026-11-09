@@ -18,23 +18,23 @@ Everything speaks the public gateway only — no privileged access, no backend c
 macOS and Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantinsider/SarvaexCLI/main/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Quantinsider/SarvaexCLI/main/install.ps1 | iex
 ```
 
 Both download the release for your machine, check its SHA-256 checksum and put `sarvaex` on your PATH
 (`~/.local/bin` on macOS and Linux). You can also download an archive from the
-[Releases page](https://github.com/Rustix69/SarvaexCLI/releases).
+[Releases page](https://github.com/Quantinsider/SarvaexCLI/releases).
 
 With Rust 1.89+ installed, build from source instead:
 
 ```bash
-cargo install --git https://github.com/Rustix69/SarvaexCLI sarvaex-cli
+cargo install --git https://github.com/Quantinsider/SarvaexCLI sarvaex-cli
 ```
 
 Then create an account on the Sarvaex website and run `sarvaex auth login`.

@@ -1,11 +1,11 @@
 #!/bin/sh
 # Installs the sarvaex CLI: downloads the release for this machine, checks its checksum and
 # puts `sarvaex` in ~/.local/bin (override with SARVAEX_INSTALL_DIR).
-#   curl -fsSL https://raw.githubusercontent.com/Rustix69/SarvaexCLI/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Quantinsider/SarvaexCLI/main/install.sh | sh
 # Pin a version with SARVAEX_VERSION=0.1.0.
 set -eu
 
-REPO="Rustix69/SarvaexCLI"
+REPO="Quantinsider/SarvaexCLI"
 BASE="${SARVAEX_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
 DEST="${SARVAEX_INSTALL_DIR:-$HOME/.local/bin}"
 
