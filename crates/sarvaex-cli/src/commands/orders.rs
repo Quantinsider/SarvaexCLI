@@ -106,17 +106,72 @@ async fn place(ctx: &Ctx, args: PlaceArgs) -> Result<i32> {
     let side = args.side.into();
     let action = args.action.into();
 
-    let mut order = if args.market {
+    let requested: Option<sarvaex_sdk::OrderType> = args.order_type.map(Into::into);
+    let trigger = requested.filter(|t| t.is_trigger());
+    if trigger.is_some() && args.market {
+        bail!("--market cannot be combined with a stop or take-profit --type");
+    }
+    if let Some(t) = requested {
+        if t == sarvaex_sdk::OrderType::Market && !args.market && trigger.is_none() {
+            bail!("--type market is the same as --market; use --market");
+        }
+        if t == sarvaex_sdk::OrderType::Limit && args.market {
+            bail!("--type limit conflicts with --market");
+        }
+    }
+    if trigger.is_none() && (args.trigger_price.is_some() || args.trigger_price_ticks.is_some()) {
+        bail!(
+            "--trigger-price needs --type stop-market, stop-limit, take-profit or take-profit-limit"
+        );
+    }
+    let mut order = if let Some(kind) = trigger {
+        let trigger_ticks = match (args.trigger_price_ticks, args.trigger_price.as_deref()) {
+            (Some(t), _) => t,
+            (None, Some(p)) => enc.parse(p)?,
+            (None, None) => bail!(
+                "give --trigger-price (or --trigger-price-ticks) for a stop or take-profit order"
+            ),
+        };
+        let limit = if kind.has_limit_price() {
+            Some(resolve_price(
+                &enc,
+                args.price.as_deref(),
+                args.price_ticks,
+            )?)
+        } else {
+            if args.price.is_some() || args.price_ticks.is_some() {
+                bail!(
+                    "{} places a market order when it fires and takes no --price; use a *-limit type for a limit price",
+                    kind.as_str()
+                );
+            }
+            None
+        };
+        NewOrder::trigger(
+            contract.ticker.clone(),
+            side,
+            action,
+            kind,
+            trigger_ticks,
+            limit,
+            args.count,
+        )
+    } else if args.market {
         NewOrder::market(contract.ticker.clone(), side, action, args.count)
     } else {
         let ticks = resolve_price(&enc, args.price.as_deref(), args.price_ticks)?;
         NewOrder::limit(contract.ticker.clone(), side, action, ticks, args.count)
     };
-    if !args.market {
+    if !order.order_type.is_market_style() {
         order.tif = args.tif.into();
     }
     order.post_only = args.post_only;
-    order.reduce_only = args.reduce_only;
+    // A stop or take-profit protects a position, so it only reduces one unless told otherwise.
+    order.reduce_only = if trigger.is_some() {
+        !args.allow_open
+    } else {
+        args.reduce_only
+    };
     if let Some(s) = args.stp {
         order.stp = s.into();
     }
@@ -133,19 +188,30 @@ async fn place(ctx: &Ctx, args: PlaceArgs) -> Result<i32> {
     // Local validation + guards before anything is sent.
     ctx.client().validate_order(&order).await?;
 
-    let display_price = if args.market {
+    let market_style = order.order_type.is_market_style();
+    let display_price = if market_style {
         "MARKET".to_owned()
     } else {
         enc.format(order.price_ticks)
     };
-    let notional = if args.market {
+    let trigger_note = order
+        .trigger_price_ticks
+        .map(|t| {
+            format!(
+                ", {} when the last price reaches {}",
+                order.order_type.as_str(),
+                enc.format(t)
+            )
+        })
+        .unwrap_or_default();
+    let notional = if market_style {
         None
     } else {
         price::estimated_notional_micro(&contract, order.price_ticks, order.count)
             .map(price::micro_to_usdc)
     };
     let describe = format!(
-        "{} {} {} × {} @ {}{}  [{}{}{}]",
+        "{} {} {} × {} @ {}{}{}  [{}{}{}]",
         action,
         order.count,
         side,
@@ -155,6 +221,7 @@ async fn place(ctx: &Ctx, args: PlaceArgs) -> Result<i32> {
             .as_ref()
             .map(|n| format!(" (≈ {n} USDC)"))
             .unwrap_or_default(),
+        trigger_note,
         order.tif.as_str(),
         if order.post_only { ", post-only" } else { "" },
         if order.reduce_only {
@@ -248,6 +315,27 @@ fn order_detail(o: &Order, enc: &PriceEncoding) -> String {
         ),
         ("status", o.status.clone()),
         (
+            "trigger",
+            o.trigger_price_ticks
+                .map(|t| {
+                    format!(
+                        "{} at {} ({} ticks)",
+                        o.order_type.clone().unwrap_or_default(),
+                        enc.format(t),
+                        t
+                    )
+                })
+                .unwrap_or_default(),
+        ),
+        ("fired as", o.fired_order_id.clone().unwrap_or_default()),
+        (
+            "reason",
+            o.reject_code
+                .clone()
+                .filter(|c| !c.is_empty())
+                .unwrap_or_default(),
+        ),
+        (
             "tif",
             format!(
                 "{}{}{}",
@@ -272,7 +360,7 @@ async fn list(
     let status = if status.eq_ignore_ascii_case("any") || status.eq_ignore_ascii_case("all") {
         None
     } else {
-        Some(status.to_ascii_uppercase())
+        Some(status.to_ascii_uppercase().replace('-', "_"))
     };
     let mut filter = OrderFilter {
         ticker: ticker.clone(),
@@ -315,10 +403,19 @@ async fn list(
                 "updated",
             ]);
             for o in &items {
-                let px = encs
-                    .get(&o.ticker)
-                    .map(|e| e.format(o.price_ticks))
-                    .unwrap_or_else(|| format!("{} ticks", o.price_ticks));
+                let fmt = |ticks: i64| {
+                    encs.get(&o.ticker)
+                        .map(|e| e.format(ticks))
+                        .unwrap_or_else(|| format!("{ticks} ticks"))
+                };
+                let px = match o.trigger_price_ticks {
+                    // A trigger order shows what arms it (and its limit price, if it has one).
+                    Some(t) if o.price_ticks > 0 => {
+                        format!("trigger {} → {}", fmt(t), fmt(o.price_ticks))
+                    }
+                    Some(t) => format!("trigger {}", fmt(t)),
+                    None => fmt(o.price_ticks),
+                };
                 t.add_row(vec![
                     o.order_id.clone(),
                     o.ticker.clone(),

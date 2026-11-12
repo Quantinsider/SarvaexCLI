@@ -433,7 +433,7 @@ pub enum OrdersCmd {
     List {
         #[arg(long)]
         ticker: Option<String>,
-        /// open | partial | filled | cancelled | rejected | expired | pending | any (default open)
+        /// open | partial | filled | cancelled | rejected | expired | pending | trigger-pending | trigger-fired | trigger-cancelled | trigger-rejected | trigger-expired | any (default open)
         #[arg(long, default_value = "open")]
         status: String,
         #[arg(long, default_value = "100")]
@@ -505,6 +505,30 @@ impl From<SideArg> for sarvaex_sdk::Side {
             SideArg::No => Self::No,
             SideArg::Long => Self::Long,
             SideArg::Short => Self::Short,
+        }
+    }
+}
+
+/// `--type` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OrderTypeArg {
+    Limit,
+    Market,
+    StopMarket,
+    StopLimit,
+    TakeProfit,
+    TakeProfitLimit,
+}
+
+impl From<OrderTypeArg> for sarvaex_sdk::OrderType {
+    fn from(t: OrderTypeArg) -> Self {
+        match t {
+            OrderTypeArg::Limit => Self::Limit,
+            OrderTypeArg::Market => Self::Market,
+            OrderTypeArg::StopMarket => Self::StopMarket,
+            OrderTypeArg::StopLimit => Self::StopLimit,
+            OrderTypeArg::TakeProfit => Self::TakeProfit,
+            OrderTypeArg::TakeProfitLimit => Self::TakeProfitLimit,
         }
     }
 }
@@ -585,9 +609,22 @@ pub struct PlaceArgs {
     /// Reject if the order would take liquidity
     #[arg(long)]
     pub post_only: bool,
-    /// Only reduce an existing position
+    /// Only reduce an existing position (always on for stop and take-profit orders unless --allow-open)
     #[arg(long)]
     pub reduce_only: bool,
+    /// Order type. Plain orders pick limit or market from --price / --market. The stop and
+    /// take-profit types are futures only and fire when the last trade price reaches --trigger-price.
+    #[arg(long = "type", value_enum)]
+    pub order_type: Option<OrderTypeArg>,
+    /// Price that arms a stop or take-profit order (display units, like --price)
+    #[arg(long, conflicts_with = "trigger_price_ticks")]
+    pub trigger_price: Option<String>,
+    /// Trigger price as raw ticks
+    #[arg(long)]
+    pub trigger_price_ticks: Option<i64>,
+    /// Let a stop or take-profit order open or grow a position instead of only reducing one
+    #[arg(long)]
+    pub allow_open: bool,
     /// Self-trade prevention mode
     #[arg(long, value_enum)]
     pub stp: Option<StpArg>,

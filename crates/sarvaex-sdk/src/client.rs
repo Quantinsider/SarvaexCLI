@@ -472,8 +472,34 @@ impl Client {
             )));
         }
         price::validate_count(&contract, order.count)?;
-        if order.order_type == OrderType::Limit {
-            price::validate_limit_price(&contract, order.price_ticks)?;
+        if order.order_type.is_trigger() {
+            if contract.kind() != ContractKind::Futures {
+                return Err(SarvaexError::Validation(format!(
+                    "{} orders are for futures contracts; {} is a {} contract",
+                    order.order_type.as_str(),
+                    contract.ticker,
+                    contract.kind().as_str()
+                )));
+            }
+            let trigger = order.trigger_price_ticks.ok_or_else(|| {
+                SarvaexError::Validation(
+                    "a trigger order needs a trigger price (--trigger-price)".into(),
+                )
+            })?;
+            price::validate_limit_price(&contract, trigger)
+                .map_err(|e| SarvaexError::Validation(format!("trigger price: {e}")))?;
+            if order.order_type.has_limit_price() {
+                price::validate_limit_price(&contract, order.price_ticks)?;
+            }
+        } else {
+            if order.trigger_price_ticks.is_some() {
+                return Err(SarvaexError::Validation(
+                    "a trigger price only applies to stop and take-profit orders (--type stop-market, stop-limit, take-profit or take-profit-limit)".into(),
+                ));
+            }
+            if order.order_type == OrderType::Limit {
+                price::validate_limit_price(&contract, order.price_ticks)?;
+            }
         }
         if order.client_order_id.len() > 128 {
             return Err(SarvaexError::Validation(
@@ -508,7 +534,7 @@ impl Client {
             )));
         }
         if let Some(max) = g.max_order_notional_micro {
-            let px = if order.order_type == OrderType::Market {
+            let px = if order.order_type.is_market_style() {
                 // Worst case for the guard: a binary fills at 99¢; futures at the contract max.
                 match contract.kind() {
                     ContractKind::Binary => 99,

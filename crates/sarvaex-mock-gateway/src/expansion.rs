@@ -317,8 +317,8 @@ fn cancel_ids(st: &mut super::Inner, user: &str, ids: &[String]) -> Value {
     let (mut cancelled, mut failed) = (Vec::new(), Vec::new());
     for id in ids {
         match st.orders.get_mut(id) {
-            Some(o) if o["user_id"] == user && matches!(o["status"].as_str(), Some("OPEN" | "PARTIAL")) => {
-                o["status"] = json!("CANCELLED");
+            Some(o) if o["user_id"] == user && matches!(o["status"].as_str(), Some("OPEN" | "PARTIAL" | "TRIGGER_PENDING")) => {
+                o["status"] = json!(if o["status"] == "TRIGGER_PENDING" { "TRIGGER_CANCELLED" } else { "CANCELLED" });
                 o["remaining_count"] = json!(0);
                 cancelled.push(json!(id));
             }
@@ -372,7 +372,10 @@ async fn cancel_all(
         .iter()
         .filter(|(_, o)| {
             o["user_id"] == user
-                && matches!(o["status"].as_str(), Some("OPEN" | "PARTIAL"))
+                && matches!(
+                    o["status"].as_str(),
+                    Some("OPEN" | "PARTIAL" | "TRIGGER_PENDING")
+                )
                 && ticker.as_deref().is_none_or(|t| o["ticker"] == t)
         })
         .map(|(id, _)| id.clone())

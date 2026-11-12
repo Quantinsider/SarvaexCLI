@@ -207,8 +207,14 @@ pub struct PlaceOrderParams {
     pub price: Option<String>,
     /// Raw integer tick price; alternative to `price`.
     pub price_ticks: Option<i64>,
-    /// `LIMIT` (default) or `MARKET`.
+    /// `LIMIT` (default), `MARKET`, or for futures only `STOP_MARKET`, `STOP_LIMIT`, `TAKE_PROFIT`,
+    /// `TAKE_PROFIT_LIMIT` (placed when the last trade price reaches `trigger_price`; the `*_LIMIT`
+    /// types also need `price`).
     pub order_type: Option<String>,
+    /// Trigger orders only: the price that arms the order, in display units.
+    pub trigger_price: Option<String>,
+    /// Trigger orders only: the trigger price as raw ticks (alternative to `trigger_price`).
+    pub trigger_price_ticks: Option<i64>,
     /// `GTC` (default), `IOC` or `FOK`.
     pub tif: Option<String>,
     /// Reject instead of taking liquidity.
@@ -883,7 +889,35 @@ impl SarvaexMcp {
         };
         let contract = try_tool!(client.get_market(ticker).await);
         let enc = PriceEncoding::for_contract(&contract);
-        let mut order = if order_type == OrderType::Market {
+        let mut order = if order_type.is_trigger() {
+            let trigger_ticks = match (p.trigger_price_ticks, p.trigger_price.as_deref()) {
+                (Some(t), _) => t,
+                (None, Some(text)) => try_tool!(enc.parse(text)),
+                (None, None) => {
+                    return tool_err(sarvaex_sdk::SarvaexError::Validation(
+                        "give `trigger_price` (or `trigger_price_ticks`) for a stop or take-profit order".into(),
+                    ))
+                }
+            };
+            let limit = if order_type.has_limit_price() {
+                Some(try_tool!(resolve_price(
+                    &contract,
+                    p.price.as_deref(),
+                    p.price_ticks
+                )))
+            } else {
+                None
+            };
+            NewOrder::trigger(
+                ticker,
+                side,
+                action,
+                order_type,
+                trigger_ticks,
+                limit,
+                p.count,
+            )
+        } else if order_type == OrderType::Market {
             NewOrder::market(ticker, side, action, p.count)
         } else {
             let ticks = try_tool!(resolve_price(&contract, p.price.as_deref(), p.price_ticks));
@@ -896,7 +930,8 @@ impl SarvaexMcp {
             );
         }
         order.post_only = p.post_only.unwrap_or(false);
-        order.reduce_only = p.reduce_only.unwrap_or(false);
+        // Stops and take-profits protect a position: reduce-only unless the caller says otherwise.
+        order.reduce_only = p.reduce_only.unwrap_or(order_type.is_trigger());
         let idem = p
             .client_order_id
             .as_deref()
@@ -906,7 +941,7 @@ impl SarvaexMcp {
         }
         // Validate (contract state, side/kind, price grid, guards) before anything leaves.
         try_tool!(client.validate_order(&order).await);
-        let display_price = if order.order_type == OrderType::Market {
+        let display_price = if order.order_type.is_market_style() {
             "MARKET".to_owned()
         } else {
             enc.format(order.price_ticks)
@@ -916,7 +951,7 @@ impl SarvaexMcp {
                 "dry_run": true,
                 "would_send": order,
                 "display": { "ticker": ticker, "side": side, "action": action, "price": display_price, "count": p.count,
-                              "estimated_notional_usdc": price::estimated_notional_micro(&contract, if order.order_type == OrderType::Market { 0 } else { order.price_ticks }, order.count).map(price::micro_to_usdc) },
+                              "estimated_notional_usdc": price::estimated_notional_micro(&contract, if order.order_type.is_market_style() { 0 } else { order.price_ticks }, order.count).map(price::micro_to_usdc) },
                 "note": "Nothing was sent. Call again with dry_run=false to submit.",
             }));
         }

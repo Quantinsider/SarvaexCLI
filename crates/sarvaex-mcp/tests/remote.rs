@@ -542,3 +542,54 @@ async fn host_validation_rejects_unknown_hosts() {
         .unwrap();
     assert!(resp.status().is_client_error(), "got {}", resp.status());
 }
+
+#[tokio::test]
+async fn trigger_orders_work_through_the_place_order_tool() {
+    let h = Harness::start().await;
+    let key = API_KEY_TRADER;
+    let (status, v) = h.mcp(key, init_msg()).await;
+    assert_eq!(status, 200, "{v}");
+
+    // Dry run shows what would be sent, with a reduce-only trigger by default.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "place_order",
+            json!({"ticker":"SXF-USCPIYOY-26SEP","side":"long","action":"sell","count":2,"order_type":"STOP_MARKET","trigger_price":"4.20","dry_run":true}),
+        )
+        .await;
+    let dry = tool_text(&v);
+    assert_eq!(dry["dry_run"], true, "{dry}");
+    assert_eq!(dry["would_send"]["order_type"], "STOP_MARKET");
+    assert_eq!(dry["would_send"]["trigger_price_ticks"], 420);
+    assert_eq!(dry["would_send"]["reduce_only"], true);
+
+    // For real: it comes back pending, armed at the trigger price.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "place_order",
+            json!({"ticker":"SXF-USCPIYOY-26SEP","side":"long","action":"sell","count":2,"order_type":"stop_limit","trigger_price":"4.20","price":"4.15"}),
+        )
+        .await;
+    let placed = tool_text(&v);
+    assert_eq!(placed["status"], "TRIGGER_PENDING", "{placed}");
+    assert_eq!(placed["order"]["trigger_price_ticks"], 420);
+    assert_eq!(placed["order"]["price_ticks"], 415);
+    let id = placed["order"]["order_id"].as_str().unwrap().to_owned();
+
+    // It is a working order the agent can cancel by id.
+    let (_, v) = h
+        .call_tool(key, "cancel_orders", json!({"order_ids": [id]}))
+        .await;
+    assert_eq!(tool_text(&v)["cancelled"][0], id.as_str());
+
+    // Misuse is a tool error, not a silent plain order: no trigger price, or a binary contract.
+    for args in [
+        json!({"ticker":"SXF-USCPIYOY-26SEP","side":"long","action":"sell","count":1,"order_type":"STOP_MARKET"}),
+        json!({"ticker":"SX-FEDDEC-26OCT-H25","side":"yes","action":"sell","count":1,"order_type":"STOP_MARKET","trigger_price":"0.40"}),
+    ] {
+        let (_, v) = h.call_tool(key, "place_order", args).await;
+        assert_eq!(v["result"]["isError"], true, "{v}");
+    }
+}

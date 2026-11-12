@@ -606,6 +606,50 @@ async fn submit_order(
         .as_str()
         .or(body["type"].as_str())
         .unwrap_or("LIMIT");
+    if matches!(
+        order_type,
+        "STOP_MARKET" | "STOP_LIMIT" | "TAKE_PROFIT" | "TAKE_PROFIT_LIMIT"
+    ) {
+        // Stops and take-profits: futures only, stored as a pending trigger (the mock never fires them).
+        if binary {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "TRIGGER_NOT_SUPPORTED",
+                "trigger orders are available on futures contracts only",
+            );
+        }
+        let Some(trigger) = body["trigger_price_ticks"].as_i64().filter(|t| *t > 0) else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "trigger_price_ticks is required for a trigger order",
+            );
+        };
+        let limit = body["price_ticks"].as_i64().unwrap_or(0);
+        if order_type.ends_with("_LIMIT") && limit <= 0 {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "price_ticks must be inside the contract's price band and on its tick grid",
+            );
+        }
+        st.seq += 1;
+        let id = format!("trg_mock_{}", st.seq);
+        let order = json!({
+            "order_id": id, "client_order_id": body["client_order_id"], "user_id": user, "ticker": ticker,
+            "side": side, "action": body["action"], "order_type": order_type,
+            "price_ticks": if order_type.ends_with("_LIMIT") { limit } else { 0 },
+            "count": count, "filled_count": 0, "remaining_count": count, "cancelled_count": 0, "expired_count": 0,
+            "tif": if body["tif"].as_str().is_some_and(|t| !t.is_empty()) { body["tif"].clone() } else { json!("GTC") },
+            "post_only": false, "reduce_only": body["reduce_only"].as_bool().unwrap_or(true), "stp": "",
+            "status": "TRIGGER_PENDING", "trigger_price_ticks": trigger, "fired_order_id": null,
+            "created_at": "2026-11-12T19:00:00Z", "updated_at": "2026-11-12T19:00:00Z", "expires_at": null,
+            "hold_id": "", "avg_fill_price_ticks": 0
+        });
+        st.orders.insert(id, order.clone());
+        return Json(json!({"order": order, "fills": [], "reject_code": "", "reject_reason": ""}))
+            .into_response();
+    }
     let market = order_type == "MARKET";
     let action = body["action"].as_str().unwrap_or("BUY");
     let mut price = body["price_ticks"].as_i64().unwrap_or(0);
@@ -805,6 +849,15 @@ async fn cancel_order(
         return err(StatusCode::NOT_FOUND, "NOT_FOUND", "order not found");
     }
     let status = order["status"].as_str().unwrap_or("").to_owned();
+    if status == "TRIGGER_PENDING" {
+        order["status"] = json!("TRIGGER_CANCELLED");
+        order["cancelled_count"] = order["count"].clone();
+        order["remaining_count"] = json!(0);
+        return Json(
+            json!({"order": order.clone(), "fills": [], "reject_code": "", "reject_reason": ""}),
+        )
+        .into_response();
+    }
     if !matches!(status.as_str(), "OPEN" | "PARTIAL") {
         let resp = json!({"order": order.clone(), "fills": [], "reject_code": "ORDER_TERMINAL", "reject_reason": "order is already terminal"});
         return (StatusCode::BAD_REQUEST, Json(resp)).into_response();

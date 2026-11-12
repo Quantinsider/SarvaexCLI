@@ -354,3 +354,284 @@ async fn read_only_mode_blocks_every_new_mutation() {
     let (code, _, _) = run(&env, &["account", "cancel-after", "status"], &guard);
     assert_eq!(code, 0);
 }
+
+const FUTURES: &str = "SXF-USCPIYOY-26SEP";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_and_take_profit_orders_place_list_get_and_cancel() {
+    let env = setup("triggers").await;
+
+    // A stop-market arms at a price and reduces a position by default.
+    let v = ok(
+        &env,
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "2",
+            "--type",
+            "stop-market",
+            "--trigger-price",
+            "4.20",
+        ],
+    );
+    assert_eq!(v["order"]["status"], "TRIGGER_PENDING", "{v}");
+    assert_eq!(v["order"]["trigger_price_ticks"], 420);
+    assert_eq!(v["order"]["reduce_only"], true);
+    let stop_id = v["order"]["order_id"].as_str().unwrap().to_owned();
+    assert!(stop_id.starts_with("trg_"));
+    assert!(
+        v["summary"].as_str().unwrap().contains("arms at 420"),
+        "{v}"
+    );
+
+    // --allow-open lets a trigger open or grow a position.
+    let v = ok(
+        &env,
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "buy",
+            "--count",
+            "1",
+            "--type",
+            "take-profit",
+            "--trigger-price-ticks",
+            "450",
+            "--allow-open",
+        ],
+    );
+    assert_eq!(v["order"]["reduce_only"], false);
+
+    // A *-limit type also takes a limit price.
+    let v = ok(
+        &env,
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-limit",
+            "--trigger-price",
+            "4.10",
+            "--price",
+            "4.05",
+        ],
+    );
+    assert_eq!(v["order"]["price_ticks"], 405);
+    assert_eq!(v["order"]["trigger_price_ticks"], 410);
+
+    // The request that would be sent is visible without sending it.
+    let v = ok(
+        &env,
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "short",
+            "--action",
+            "buy",
+            "--count",
+            "1",
+            "--type",
+            "take-profit-limit",
+            "--trigger-price",
+            "3.90",
+            "--price",
+            "3.95",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(v["would_send"]["order_type"], "TAKE_PROFIT_LIMIT");
+    assert_eq!(v["would_send"]["trigger_price_ticks"], 390);
+    assert_eq!(v["would_send"]["price_ticks"], 395);
+
+    // Listing and getting.
+    let v = ok(&env, &["orders", "list", "--status", "trigger-pending"]);
+    assert_eq!(v["count"], 3, "{v}");
+    assert!(
+        v["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["trigger_price_ticks"].is_number())
+    );
+    let v = ok(&env, &["orders", "get", &stop_id]);
+    assert_eq!(v["status"], "TRIGGER_PENDING");
+
+    // Cancel one; cancel-all takes the rest.
+    let v = ok(&env, &["orders", "cancel", &stop_id]);
+    assert_eq!(v["order"]["status"], "TRIGGER_CANCELLED", "{v}");
+    let v = ok(&env, &["orders", "list", "--status", "trigger-pending"]);
+    assert_eq!(v["count"], 2);
+    let v = ok(&env, &["orders", "cancel-all", "--yes"]);
+    assert_eq!(v["cancelled"].as_array().unwrap().len(), 2, "{v}");
+    let v = ok(&env, &["orders", "list", "--status", "trigger-pending"]);
+    assert_eq!(v["count"], 0);
+    let v = ok(&env, &["orders", "list", "--status", "trigger-cancelled"]);
+    assert_eq!(v["count"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trigger_orders_are_refused_locally_when_misused() {
+    let env = setup("triggerbad").await;
+    let fails = |args: &[&str], needle: &str| {
+        let (code, _, err) = run(&env, args, &[]);
+        assert_ne!(code, 0, "{args:?} should fail");
+        assert!(
+            err.contains(needle),
+            "{args:?}: expected '{needle}' in {err}"
+        );
+    };
+    // Binary contracts have no triggers.
+    fails(
+        &[
+            "orders",
+            "place",
+            BINARY,
+            "--side",
+            "yes",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-market",
+            "--trigger-price",
+            "0.40",
+        ],
+        "futures",
+    );
+    // A trigger type needs a trigger price.
+    fails(
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-market",
+        ],
+        "--trigger-price",
+    );
+    // A trigger price needs a trigger type.
+    fails(
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--price",
+            "4.20",
+            "--trigger-price",
+            "4.00",
+        ],
+        "--type",
+    );
+    // A market-style trigger takes no limit price; a limit-style one needs it.
+    fails(
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-market",
+            "--trigger-price",
+            "4.00",
+            "--price",
+            "3.90",
+        ],
+        "takes no --price",
+    );
+    fails(
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-limit",
+            "--trigger-price",
+            "4.00",
+        ],
+        "--price",
+    );
+    // --market is a different kind of order.
+    fails(
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "take-profit",
+            "--trigger-price",
+            "4.00",
+            "--market",
+        ],
+        "--market",
+    );
+    // Read-only guards block them like any order.
+    let (code, _, _) = run(
+        &env,
+        &[
+            "orders",
+            "place",
+            FUTURES,
+            "--side",
+            "long",
+            "--action",
+            "sell",
+            "--count",
+            "1",
+            "--type",
+            "stop-market",
+            "--trigger-price",
+            "4.00",
+        ],
+        &[("SARVAEX_READ_ONLY", "true")],
+    );
+    assert_eq!(code, 7);
+}

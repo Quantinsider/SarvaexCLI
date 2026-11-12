@@ -70,7 +70,17 @@ exchange is a float.
 14. **Fees.** Taker fees are 0 while trading is free; `sarvaex exchange fees` shows
     the schedule and `sarvaex account fees` what you have paid. Fees are charged on
     the price of the side you trade.
-15. **Key limits are enforced by the exchange.** A key created with
+15. **Stops and take-profits (futures only).** `orders place … --type stop-market --trigger-price
+    4.20` waits for the last trade price to reach the trigger, then the exchange places the
+    order for you. Types: `stop-market`, `stop-limit`, `take-profit`, `take-profit-limit` (the
+    `-limit` ones also need `--price`). They are reduce-only unless you add `--allow-open`. A
+    trigger the market has already passed is refused (`TRIGGER_ALREADY_CROSSED`). The placed
+    order has status `TRIGGER_PENDING`; `orders list --status trigger-pending` shows them and
+    `orders cancel <id>` removes one. When one fires it becomes `TRIGGER_FIRED` and
+    `fired_order_id` is the real order, so check that order, not the trigger, for the fill. A
+    stop only protects you if the market trades through it: in a thin book a market stop can fill
+    well away from the trigger price.
+16. **Key limits are enforced by the exchange.** A key created with
     `--max-order-count`, `--max-order-notional-usdc`, `--max-daily-notional-usdc`,
     `--allow-ticker` or `--read-only` is refused with `KEY_LIMIT_EXCEEDED` (HTTP 403)
     beyond them. That is a boundary, not an error to retry around.
@@ -98,6 +108,9 @@ sarvaex orders cancel <order_id>
 sarvaex orders cancel-all --ticker SX-FEDDEC-26OCT-H25
 sarvaex orders amend <order_id> --price 0.52              # in place when possible
 sarvaex orders batch orders.json                          # 1-20 orders from a JSON file (or - for stdin)
+sarvaex orders place SXF-… --side long --action sell --count 2 --type stop-market --trigger-price 4.20
+sarvaex orders place SXF-… --side long --action sell --count 2 --type take-profit-limit --trigger-price 4.60 --price 4.55
+sarvaex orders list --status trigger-pending              # stops and take-profits waiting to fire
 sarvaex orders cancel-batch <id> <id> …                   # up to 50 ids
 sarvaex positions list
 sarvaex positions close SX-FEDDEC-26OCT-H25               # reduce-only; --price for a limit order

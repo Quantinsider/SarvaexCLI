@@ -1946,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "sarvaex-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "sarvaex-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "sarvaex-mock-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "futures",
@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "sarvaex-sdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

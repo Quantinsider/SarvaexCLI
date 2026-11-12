@@ -51,10 +51,10 @@ schemas = {
     },
     "Side": {"type": "string", "enum": ["YES", "NO", "LONG", "SHORT"], "description": "YES/NO for binary contracts, LONG/SHORT for futures. Uppercase only."},
     "Action": {"type": "string", "enum": ["BUY", "SELL"]},
-    "OrderType": {"type": "string", "enum": ["LIMIT", "MARKET"]},
+    "OrderType": {"type": "string", "enum": ["LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT"], "description": "The four trigger types are futures only: the exchange places a market order (STOP_MARKET, TAKE_PROFIT) or a limit order at price_ticks (STOP_LIMIT, TAKE_PROFIT_LIMIT) when the last trade price reaches trigger_price_ticks."},
     "Tif": {"type": "string", "enum": ["GTC", "IOC", "FOK"]},
     "Stp": {"type": "string", "enum": ["UNSPECIFIED", "TAKER_AT_CROSS", "MAKER"]},
-    "OrderStatus": {"type": "string", "enum": ["PENDING", "OPEN", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"]},
+    "OrderStatus": {"type": "string", "enum": ["PENDING", "OPEN", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "EXPIRED", "TRIGGER_PENDING", "TRIGGER_FIRED", "TRIGGER_CANCELLED", "TRIGGER_REJECTED", "TRIGGER_EXPIRED"], "description": "TRIGGER_* statuses belong to stop and take-profit orders; they are listed only by asking for one of them in the status filter."},
     "PriceEncoding": {
         "type": "object",
         "description": "How to render price_ticks for this contract: display = ticks / divider.",
@@ -131,6 +131,7 @@ schemas = {
             "side": ref("Side"),
             "action": ref("Action"),
             "order_type": {"allOf": [ref("OrderType")], "default": "LIMIT"},
+            "trigger_price_ticks": {"type": "integer", "minimum": 1, "description": "Required for the four trigger order types (futures only): the last trade price that arms the order. Trigger orders are reduce-only unless reduce_only is false."},
             "price_ticks": {"type": "integer", "description": "Tick-aligned limit price. 0 / omitted for MARKET orders."},
             "count": {"type": "integer", "minimum": 1},
             "tif": {"allOf": [ref("Tif")], "default": "GTC"},
@@ -315,6 +316,13 @@ paths.update({
     "/v1/account/api-keys/{key_id}/limits": {"patch": {"operationId": "patchApiKeyLimits", "tags": ["auth"], "summary": "Replace a key's trading caps (null removes them)", "parameters": [KEY_ID], "requestBody": body({"type": "object", "required": ["limits"], "properties": {"limits": {"oneOf": [LIMITS, {"type": "null"}]}}}), "responses": {"200": resp(OBJ), **errs(400, 401, 403, 404)}}},
 })
 schemas["KeyLimits"] = LIMITS
+schemas["Order"]["properties"].update({
+    "order_type": {"type": "string", "description": "Trigger orders only."},
+    "trigger_price_ticks": {"type": "integer", "description": "Trigger orders only: the price that arms the order."},
+    "trigger_direction": {"type": "string", "enum": ["LTE", "GTE"], "description": "Trigger orders only: fires when the last trade price is at or below (LTE) or at or above (GTE) the trigger."},
+    "fired_order_id": {"type": ["string", "null"], "description": "Trigger orders only: the order placed when it fired."},
+    "reject_code": {"type": "string", "description": "Trigger orders only: why it was rejected, cancelled or expired."},
+})
 schemas["ApiKeyCreateRequest"]["properties"]["limits"] = {"$ref": "#/components/schemas/KeyLimits"}
 
 spec = {

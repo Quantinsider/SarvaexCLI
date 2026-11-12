@@ -71,6 +71,8 @@ sarvaex exchange status                  # is trading open? (OPEN / CANCEL_ONLY 
 sarvaex exchange schedule | time | fees
 sarvaex orders amend <order_id> --price 0.52          # in place when possible, else cancel + replace
 sarvaex orders batch orders.json                      # 1-20 orders from a JSON file (or - for stdin)
+sarvaex orders place SXF-… --side long --action sell --count 2 --type stop-market --trigger-price 4.20
+sarvaex orders list --status trigger-pending          # stops and take-profits waiting to fire
 sarvaex orders cancel-batch <id> <id> …               # up to 50 ids in one call
 sarvaex orders cancel-all [--ticker SX-…]             # one request on current gateways
 sarvaex positions close SX-…                          # reduce-only; --price for a limit order
@@ -89,6 +91,22 @@ A batch file is a JSON array; prices are in display units like everywhere else:
   {"ticker": "SX-FEDDEC-26OCT-H25", "side": "yes", "action": "sell", "price_ticks": 55, "count": 5, "tif": "gtc"}
 ]
 ```
+
+### Stop and take-profit orders (futures)
+
+```bash
+# Sell 2 long if the last price falls to 4.20, at the market:
+sarvaex orders place SXF-USCPIYOY-26SEP --side long --action sell --count 2 --type stop-market --trigger-price 4.20
+# Sell 2 long if it rises to 4.60, but only at 4.55 or better:
+sarvaex orders place SXF-USCPIYOY-26SEP --side long --action sell --count 2 --type take-profit-limit --trigger-price 4.60 --price 4.55
+sarvaex orders list --status trigger-pending      # what is waiting
+sarvaex orders cancel trg_…                       # remove one
+```
+
+Types are `stop-market`, `stop-limit`, `take-profit` and `take-profit-limit`; the `-limit` ones
+need `--price`. They are reduce-only unless you add `--allow-open`. A trigger the market has
+already reached is refused. When one fires it becomes `TRIGGER_FIRED` and `fired_order_id` is the
+order that was placed.
 
 ### API keys with trading caps
 

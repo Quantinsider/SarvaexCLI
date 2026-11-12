@@ -2,6 +2,17 @@
 
 Versions follow [semver](https://semver.org). The version lives in one place: `[workspace.package] version` in `Cargo.toml`.
 
+## 0.3.0
+
+Stop and take-profit orders for futures.
+
+- `orders place --type stop-market | stop-limit | take-profit | take-profit-limit --trigger-price P`: the exchange places the order for you when the last trade price reaches the trigger. Futures only; reduce-only unless you add `--allow-open`; `-limit` types also take `--price`.
+- `orders list --status trigger-pending` (also `trigger-fired`, `trigger-cancelled`, `trigger-rejected`, `trigger-expired`), `orders get` and `orders cancel` work on trigger orders, and `orders cancel-all` includes them.
+- SDK: `OrderType` gains the four trigger types, `NewOrder::trigger(...)`, and `Order` carries `trigger_price_ticks` and `fired_order_id`.
+- MCP: `place_order` accepts `order_type` STOP_MARKET, STOP_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT with `trigger_price` (or `trigger_price_ticks`).
+- OpenAPI describes the new order types, statuses and fields. The mock gateway accepts triggers.
+- Needs a gateway with trigger orders (api.sarvaex.com has them). Older gateways answer `INVALID_ARGUMENT` to the new order types.
+
 ## 0.2.0
 
 Everything the exchange added to its API, from the CLI, SDK and MCP server.

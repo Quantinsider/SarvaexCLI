@@ -211,6 +211,18 @@ impl fmt::Display for Action {
 pub enum OrderType {
     Limit,
     Market,
+    /// Futures only: market order when the last price falls (selling a long) or rises (buying back a short) to the trigger.
+    #[serde(rename = "STOP_MARKET")]
+    StopMarket,
+    /// Futures only: like `StopMarket`, but places a limit order at `price_ticks`.
+    #[serde(rename = "STOP_LIMIT")]
+    StopLimit,
+    /// Futures only: market order when the last price moves in your favour to the trigger.
+    #[serde(rename = "TAKE_PROFIT")]
+    TakeProfit,
+    /// Futures only: like `TakeProfit`, but places a limit order at `price_ticks`.
+    #[serde(rename = "TAKE_PROFIT_LIMIT")]
+    TakeProfitLimit,
 }
 
 impl OrderType {
@@ -218,17 +230,43 @@ impl OrderType {
         match self {
             Self::Limit => "LIMIT",
             Self::Market => "MARKET",
+            Self::StopMarket => "STOP_MARKET",
+            Self::StopLimit => "STOP_LIMIT",
+            Self::TakeProfit => "TAKE_PROFIT",
+            Self::TakeProfitLimit => "TAKE_PROFIT_LIMIT",
         }
+    }
+
+    /// A stop or take-profit: armed by a trigger price, placed only when the market reaches it.
+    pub fn is_trigger(self) -> bool {
+        !matches!(self, Self::Limit | Self::Market)
+    }
+
+    /// Orders that carry no price of their own and execute at the market when they run.
+    pub fn is_market_style(self) -> bool {
+        matches!(self, Self::Market | Self::StopMarket | Self::TakeProfit)
+    }
+
+    /// Orders that need a limit price (`price_ticks`).
+    pub fn has_limit_price(self) -> bool {
+        matches!(self, Self::Limit | Self::StopLimit | Self::TakeProfitLimit)
     }
 }
 
 impl std::str::FromStr for OrderType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_uppercase().as_str() {
+        let normal = s.trim().to_ascii_uppercase().replace(['-', ' '], "_");
+        match normal.as_str() {
             "LIMIT" | "LMT" => Ok(Self::Limit),
             "MARKET" | "MKT" => Ok(Self::Market),
-            other => Err(format!("unknown order type '{other}' (limit|market)")),
+            "STOP_MARKET" | "STOP" => Ok(Self::StopMarket),
+            "STOP_LIMIT" => Ok(Self::StopLimit),
+            "TAKE_PROFIT" | "TAKE_PROFIT_MARKET" => Ok(Self::TakeProfit),
+            "TAKE_PROFIT_LIMIT" => Ok(Self::TakeProfitLimit),
+            other => Err(format!(
+                "unknown order type '{other}' (limit, market, stop-market, stop-limit, take-profit, take-profit-limit)"
+            )),
         }
     }
 }
@@ -552,9 +590,45 @@ pub struct NewOrder {
     pub stp: Stp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Trigger orders only: the last trade price that arms the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price_ticks: Option<i64>,
 }
 
 impl NewOrder {
+    /// A futures stop or take-profit. `limit_price_ticks` is required for the `*_LIMIT`
+    /// types and ignored for the market ones. Trigger orders reduce a position by default;
+    /// set `reduce_only = false` to let one open or grow a position.
+    pub fn trigger(
+        ticker: impl Into<String>,
+        side: Side,
+        action: Action,
+        order_type: OrderType,
+        trigger_price_ticks: i64,
+        limit_price_ticks: Option<i64>,
+        count: i64,
+    ) -> Self {
+        Self {
+            client_order_id: crate::idempotency::client_order_id(),
+            ticker: ticker.into(),
+            side,
+            action,
+            order_type,
+            price_ticks: if order_type.has_limit_price() {
+                limit_price_ticks.unwrap_or(0)
+            } else {
+                0
+            },
+            count,
+            tif: Tif::Gtc,
+            post_only: false,
+            reduce_only: true,
+            stp: Stp::Unspecified,
+            expires_at: None,
+            trigger_price_ticks: Some(trigger_price_ticks),
+        }
+    }
+
     pub fn limit(
         ticker: impl Into<String>,
         side: Side,
@@ -575,6 +649,7 @@ impl NewOrder {
             reduce_only: false,
             stp: Stp::Unspecified,
             expires_at: None,
+            trigger_price_ticks: None,
         }
     }
     pub fn market(ticker: impl Into<String>, side: Side, action: Action, count: i64) -> Self {
@@ -635,14 +710,39 @@ pub struct Order {
     pub expires_at: Option<String>,
     pub hold_id: String,
     pub avg_fill_price_ticks: i64,
+    /// Trigger orders only: STOP_MARKET, STOP_LIMIT, TAKE_PROFIT or TAKE_PROFIT_LIMIT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_type: Option<String>,
+    /// Trigger orders only: the price that arms the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price_ticks: Option<i64>,
+    /// Trigger orders only: the order placed when it fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired_order_id: Option<String>,
+    /// Trigger orders only: why a trigger was rejected, cancelled or expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_code: Option<String>,
 }
 
 impl Order {
-    /// True when the order can no longer fill (FILLED, CANCELLED, REJECTED, EXPIRED).
+    /// True for a stop or take-profit (status `TRIGGER_*`).
+    pub fn is_trigger(&self) -> bool {
+        self.status.starts_with("TRIGGER_")
+    }
+
+    /// True when the order can no longer fill or fire (FILLED, CANCELLED, REJECTED, EXPIRED,
+    /// or a trigger that fired, was cancelled, rejected or expired).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status.as_str(),
-            "FILLED" | "CANCELLED" | "REJECTED" | "EXPIRED"
+            "FILLED"
+                | "CANCELLED"
+                | "REJECTED"
+                | "EXPIRED"
+                | "TRIGGER_FIRED"
+                | "TRIGGER_CANCELLED"
+                | "TRIGGER_REJECTED"
+                | "TRIGGER_EXPIRED"
         )
     }
     pub fn is_working(&self) -> bool {
@@ -695,6 +795,16 @@ impl OrderResponse {
             return format!("REJECTED ({code}): {}", self.reject_reason);
         }
         let o = &self.order;
+        if o.is_trigger() {
+            let mut s = format!("{} {} contract(s)", o.status, o.count);
+            if let Some(t) = o.trigger_price_ticks {
+                s.push_str(&format!(", arms at {t} ticks"));
+            }
+            if let Some(id) = o.fired_order_id.as_deref() {
+                s.push_str(&format!(", fired as {id}"));
+            }
+            return s;
+        }
         let mut s = format!("{} {}/{}", o.status, o.filled_count, o.count);
         if o.filled_count > 0 {
             s.push_str(&format!(" @ avg {} ticks", o.avg_fill_price_ticks));
@@ -1192,5 +1302,139 @@ mod yes_no_tests {
         assert_eq!(fill.no_price_ticks, Some(40));
         let old: PublicFill = serde_json::from_str(r#"{"fill_id":"f","price_ticks":60}"#).unwrap();
         assert_eq!(old.no_price_ticks, None, "older gateways omit the fields");
+    }
+}
+
+#[cfg(test)]
+mod trigger_order_tests {
+    use super::*;
+
+    #[test]
+    fn order_types_parse_in_every_spelling_and_serialize_with_underscores() {
+        for (text, want) in [
+            ("stop-market", OrderType::StopMarket),
+            ("STOP_MARKET", OrderType::StopMarket),
+            ("stop", OrderType::StopMarket),
+            ("Stop Limit", OrderType::StopLimit),
+            ("take-profit", OrderType::TakeProfit),
+            ("take_profit_limit", OrderType::TakeProfitLimit),
+            ("limit", OrderType::Limit),
+            ("MKT", OrderType::Market),
+        ] {
+            assert_eq!(text.parse::<OrderType>().unwrap(), want, "{text}");
+        }
+        assert!("sideways".parse::<OrderType>().is_err());
+        for t in [
+            OrderType::Limit,
+            OrderType::Market,
+            OrderType::StopMarket,
+            OrderType::StopLimit,
+            OrderType::TakeProfit,
+            OrderType::TakeProfitLimit,
+        ] {
+            assert_eq!(
+                serde_json::to_value(t).unwrap(),
+                t.as_str(),
+                "wire name of {t:?}"
+            );
+            assert_eq!(
+                serde_json::from_value::<OrderType>(serde_json::json!(t.as_str())).unwrap(),
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn order_type_classification() {
+        assert!(!OrderType::Limit.is_trigger() && !OrderType::Market.is_trigger());
+        for t in [
+            OrderType::StopMarket,
+            OrderType::StopLimit,
+            OrderType::TakeProfit,
+            OrderType::TakeProfitLimit,
+        ] {
+            assert!(t.is_trigger());
+        }
+        assert!(
+            OrderType::Market.is_market_style()
+                && OrderType::StopMarket.is_market_style()
+                && OrderType::TakeProfit.is_market_style()
+        );
+        assert!(!OrderType::StopLimit.is_market_style() && !OrderType::Limit.is_market_style());
+        assert!(
+            OrderType::StopLimit.has_limit_price()
+                && OrderType::TakeProfitLimit.has_limit_price()
+                && OrderType::Limit.has_limit_price()
+        );
+        assert!(!OrderType::StopMarket.has_limit_price() && !OrderType::Market.has_limit_price());
+    }
+
+    #[test]
+    fn trigger_orders_reduce_only_by_default_and_ordinary_orders_omit_the_trigger_field() {
+        let stop = NewOrder::trigger(
+            "SXF-A",
+            Side::Long,
+            Action::Sell,
+            OrderType::StopMarket,
+            420,
+            Some(999),
+            2,
+        );
+        assert!(stop.reduce_only, "protects a position by default");
+        assert_eq!(
+            stop.price_ticks, 0,
+            "a market-style trigger carries no limit price"
+        );
+        assert_eq!(
+            serde_json::to_value(&stop).unwrap()["trigger_price_ticks"],
+            420
+        );
+        let limit = NewOrder::trigger(
+            "SXF-A",
+            Side::Long,
+            Action::Sell,
+            OrderType::StopLimit,
+            420,
+            Some(415),
+            2,
+        );
+        assert_eq!(limit.price_ticks, 415);
+        let plain = NewOrder::limit("SX-A", Side::Yes, Action::Buy, 51, 1);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("trigger_price_ticks")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn trigger_statuses_are_terminal_once_fired_cancelled_rejected_or_expired() {
+        let status = |s: &str| {
+            serde_json::from_value::<Order>(serde_json::json!({"order_id": "trg_1", "status": s}))
+                .unwrap()
+        };
+        for done in [
+            "TRIGGER_FIRED",
+            "TRIGGER_CANCELLED",
+            "TRIGGER_REJECTED",
+            "TRIGGER_EXPIRED",
+            "FILLED",
+        ] {
+            assert!(status(done).is_terminal(), "{done}");
+        }
+        for live in ["TRIGGER_PENDING", "OPEN", "PARTIAL"] {
+            assert!(!status(live).is_terminal(), "{live}");
+        }
+        assert!(status("TRIGGER_PENDING").is_trigger() && !status("OPEN").is_trigger());
+        // An order from an older gateway has none of the trigger fields.
+        let o = status("OPEN");
+        assert!(o.trigger_price_ticks.is_none() && o.fired_order_id.is_none());
+        assert!(
+            serde_json::to_value(&o)
+                .unwrap()
+                .get("trigger_price_ticks")
+                .is_none()
+        );
     }
 }
