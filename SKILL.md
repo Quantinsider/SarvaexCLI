@@ -54,6 +54,26 @@ exchange is a float.
    around a guard; report it.
 9. **Rate limits**: 1200 reads and 240 writes per minute per credential.
    Back off on `RATE_LIMITED` (the CLI already retries with `Retry-After`).
+   Every order in a batch counts as one write.
+10. **Check the exchange first.** `sarvaex exchange status` (`get_exchange_status`)
+    says whether new orders are allowed: mode `OPEN`, `CANCEL_ONLY` (cancels only) or
+    `CLOSED`, plus any maintenance window. Do not place orders while it is not `OPEN`.
+11. **Running unattended? Arm the dead man's switch.** `sarvaex account cancel-after set 60`
+    (`set_cancel_after`) cancels every working order if 60 s pass without a refresh;
+    placing an order or running it again pushes the deadline out. Disarm with `off`.
+12. **Amending can replace.** `orders amend` changes price and/or count. When the
+    exchange cannot amend in place it cancels and re-submits (new order id, queue
+    priority lost); the answer says which in `amended_via` (`IN_PLACE` or
+    `CANCEL_REPLACE`). Pass `--no-cancel-replace` to fail instead.
+13. **Batches are not atomic.** `orders batch` places up to 20 orders; read each
+    result. `orders cancel-batch` cancels up to 50 ids. Failures exit with code 4/1.
+14. **Fees.** Taker fees are 0 while trading is free; `sarvaex exchange fees` shows
+    the schedule and `sarvaex account fees` what you have paid. Fees are charged on
+    the price of the side you trade.
+15. **Key limits are enforced by the exchange.** A key created with
+    `--max-order-count`, `--max-order-notional-usdc`, `--max-daily-notional-usdc`,
+    `--allow-ticker` or `--read-only` is refused with `KEY_LIMIT_EXCEEDED` (HTTP 403)
+    beyond them. That is a boundary, not an error to retry around.
 
 ## Prices on the command line
 
@@ -76,10 +96,26 @@ sarvaex orders place SX-… --side no --action buy --market --count 5
 sarvaex orders list --status open
 sarvaex orders cancel <order_id>
 sarvaex orders cancel-all --ticker SX-FEDDEC-26OCT-H25
+sarvaex orders amend <order_id> --price 0.52              # in place when possible
+sarvaex orders batch orders.json                          # 1-20 orders from a JSON file (or - for stdin)
+sarvaex orders cancel-batch <id> <id> …                   # up to 50 ids
 sarvaex positions list
+sarvaex positions close SX-FEDDEC-26OCT-H25               # reduce-only; --price for a limit order
 sarvaex account balance | risk | fills | history
+sarvaex account activity --types fill,order --limit 20    # one feed of fills, orders, settlements, cash
+sarvaex account fees | incentives | settlements
+sarvaex account cancel-after set 60 | status | off        # dead man's switch
+sarvaex exchange status | schedule | time | fees          # is trading open? what closes soon?
+sarvaex markets stats SX-A SX-B                           # last price, 24h volume, best bid/ask
+sarvaex markets candles SX-A --interval 1h --limit 24
+sarvaex markets trades SX-A --from 2026-11-10T00:00:00Z
+sarvaex markets books SX-A SX-B --depth 5                 # several books in one call
+sarvaex auth keys create --name bot --max-order-count 20 --max-order-notional-usdc 50 --allow-ticker SX-A
+sarvaex auth keys limits <key_id> --clear
 sarvaex margin preview SXF-… --side long --action buy --price 4.30 --count 2
 sarvaex stream SX-FEDDEC-26OCT-H25 --private  # NDJSON book deltas, trades, your fills
+sarvaex stream --orders --exchange --lifecycle          # your order updates, exchange mode, market open/close
+sarvaex stream SX-A --ticker-stats --candles 1m         # live statistics and candles
 ```
 
 Add `--json` to any command for machine-readable output (automatic when stdout
@@ -95,7 +131,10 @@ Exit codes: `0` ok · `1` error · `2` usage · `3` auth · `4` order rejected �
 `get_balance`, `get_account_risk`, `get_account_margin`, `list_positions`,
 `get_fill_history`, `get_ledger_history`, `list_orders`, `get_order`,
 `place_order` (supports `dry_run`), `cancel_order`, `cancel_all_orders`,
-`preview_margin`, `credit_demo_funds`, `get_trading_rules`.
+`preview_margin`, `credit_demo_funds`, `get_trading_rules`, and for the expanded API:
+`get_exchange_status`, `get_fee_schedule`, `get_market_stats`, `get_candles`,
+`get_account_activity`, `amend_order`, `cancel_orders`, `close_position`,
+`set_cancel_after`.
 
 `place_order` accepts either `price` (human units like `0.51` or `4.30`) or
 `price_ticks`. Always call it with `dry_run: true` first when the user has not

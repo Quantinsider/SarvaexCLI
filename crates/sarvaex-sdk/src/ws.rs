@@ -68,6 +68,24 @@ impl WsConnection {
             .await
     }
 
+    /// Subscribe to any gateway channel: `orders`, `lifecycle` and `exchange` take no
+    /// ticker; `ticker` and `candles` need one (and `candles` an `interval`).
+    pub async fn subscribe_channel(
+        &mut self,
+        channel: &str,
+        ticker: Option<&str>,
+        interval: Option<&str>,
+    ) -> Result<()> {
+        let mut msg = json!({ "op": "subscribe", "channel": channel });
+        if let Some(t) = ticker {
+            msg["ticker"] = json!(t);
+        }
+        if let Some(i) = interval {
+            msg["interval"] = json!(i);
+        }
+        self.send_json(&msg).await
+    }
+
     pub async fn send_json(&mut self, v: &Value) -> Result<()> {
         self.sink
             .send(Message::text(v.to_string()))

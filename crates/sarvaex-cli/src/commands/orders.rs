@@ -34,6 +34,33 @@ pub async fn run(ctx: &Ctx, cmd: OrdersCmd) -> Result<i32> {
                 .await?;
             emit_order_response(ctx, &resp, None).await
         }
+        OrdersCmd::Amend {
+            order_id,
+            price,
+            price_ticks,
+            count,
+            no_cancel_replace,
+            idempotency_key,
+        } => {
+            super::expansion::amend(
+                ctx,
+                order_id,
+                price,
+                price_ticks,
+                count,
+                no_cancel_replace,
+                idempotency_key,
+            )
+            .await
+        }
+        OrdersCmd::Batch {
+            file,
+            idempotency_key,
+        } => super::expansion::batch(ctx, file, idempotency_key).await,
+        OrdersCmd::CancelBatch {
+            order_ids,
+            idempotency_key,
+        } => super::expansion::cancel_batch(ctx, order_ids, idempotency_key).await,
         OrdersCmd::CancelAll { ticker } => {
             if !ctx.confirm(&format!(
                 "Cancel ALL working orders{}?",

@@ -452,3 +452,95 @@ async fn websocket_stream_applies_book_and_detects_gaps() {
     );
     conn.close().await;
 }
+
+#[tokio::test]
+async fn expanded_api_methods_follow_the_documented_shapes() {
+    let gw = MockGateway::new();
+    let base = gw.spawn().await;
+    let c = client(&base, API_KEY_TRADER, Guards::default()).await;
+
+    assert_eq!(c.exchange_status().await.unwrap()["mode"], "OPEN");
+    assert_eq!(c.fee_schedule().await.unwrap()["taker_fee_bps"], 0);
+    assert!(c.server_time().await.unwrap()["epoch_ms"].is_number());
+
+    // Amend needs a change; a price-only amend stays in place; a count change is replaced.
+    let order = NewOrder::limit("SX-FEDDEC-26OCT-H25", Side::Yes, Action::Buy, 10, 3);
+    let placed = c.place_order(&order, None).await.unwrap();
+    let id = placed.order.order_id.clone();
+    assert!(c.amend_order(&id, None, None, true, None).await.is_err());
+    let v = c
+        .amend_order(&id, Some(12), None, true, None)
+        .await
+        .unwrap();
+    assert_eq!(v["amended_via"], "IN_PLACE");
+    let v = c.amend_order(&id, None, Some(5), true, None).await.unwrap();
+    assert_eq!(v["amended_via"], "CANCEL_REPLACE");
+
+    // Batch bounds are enforced before any request is sent.
+    assert!(c.batch_orders(&[], None).await.is_err());
+    let many: Vec<NewOrder> = (0..21).map(|_| order.clone()).collect();
+    assert!(c.batch_orders(&many, None).await.is_err());
+    let two = vec![order.clone(), order.clone()];
+    let v = c.batch_orders(&two, None).await.unwrap();
+    assert_eq!(v["accepted"], 2);
+
+    // Dead man's switch bounds and round trip.
+    assert!(c.set_cancel_after(3601, None).await.is_err());
+    assert_eq!(c.set_cancel_after(45, None).await.unwrap()["armed"], true);
+    assert_eq!(c.cancel_after_status().await.unwrap()["seconds"], 45);
+    assert_eq!(c.set_cancel_after(0, None).await.unwrap()["armed"], false);
+
+    // Cancelling in bulk uses the single-request endpoint when the gateway has it.
+    let (cancelled, failed) = c.cancel_all_orders(None).await.unwrap();
+    assert!(!cancelled.is_empty() && failed.is_empty());
+    assert!(gw.calls().iter().any(|p| p == "POST /v1/orders/cancel-all"));
+}
+
+#[tokio::test]
+async fn cancel_all_falls_back_to_one_by_one_on_an_older_gateway() {
+    use axum::routing::get;
+    // A gateway without the expansion: no cancel-all route (404), orders listing works.
+    let app = axum::Router::new().route(
+        "/v1/orders",
+        get(|| async { axum::Json(serde_json::json!({"orders": [], "next_cursor": ""})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let c = client(&base, API_KEY_TRADER, Guards::default()).await;
+    let (cancelled, failed) = c.cancel_all_orders(None).await.unwrap();
+    assert!(cancelled.is_empty() && failed.is_empty());
+}
+
+#[tokio::test]
+async fn read_only_guard_blocks_the_new_mutations() {
+    let gw = MockGateway::new();
+    let base = gw.spawn().await;
+    let c = client(
+        &base,
+        API_KEY_TRADER,
+        Guards {
+            read_only: true,
+            ..Guards::default()
+        },
+    )
+    .await;
+    assert!(
+        c.amend_order("ord_1", Some(5), None, true, None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only")
+    );
+    assert!(c.cancel_batch(&["ord_1".to_owned()], None).await.is_err());
+    assert!(c.cancel_all_server(None, None).await.is_err());
+    assert!(
+        c.close_position("SX-FEDDEC-26OCT-H25", None, None, None)
+            .await
+            .is_err()
+    );
+    assert!(c.set_cancel_after(10, None).await.is_err());
+    assert!(c.set_api_key_limits("kid-1", None).await.is_err());
+    // Reads are unaffected.
+    assert!(c.cancel_after_status().await.is_ok());
+}

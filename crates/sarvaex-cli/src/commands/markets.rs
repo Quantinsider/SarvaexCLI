@@ -209,6 +209,21 @@ pub async fn markets(ctx: &Ctx, cmd: MarketsCmd) -> Result<i32> {
             );
             Ok(exit::OK)
         }
+        MarketsCmd::Candles {
+            ticker,
+            interval,
+            from,
+            to,
+            limit,
+        } => super::expansion::candles(ctx, ticker, interval, from, to, limit).await,
+        MarketsCmd::Trades {
+            ticker,
+            from,
+            to,
+            limit,
+        } => super::expansion::trades(ctx, ticker, from, to, limit).await,
+        MarketsCmd::Stats { tickers } => super::expansion::stats(ctx, tickers).await,
+        MarketsCmd::Books { tickers, depth } => super::expansion::books(ctx, tickers, depth).await,
         MarketsCmd::Oi { ticker } => {
             let oi = ctx.client().open_interest(&ticker).await?;
             ctx.out.emit(&oi, || {

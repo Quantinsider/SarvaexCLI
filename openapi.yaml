@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SarvaEX Public API
-  version: 1.0.0
+  version: 1.1.0
   description: 'Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout;
     futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. Every POST that changes state
     requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential.'
@@ -19,6 +19,7 @@ tags:
 - name: account
 - name: auth
 - name: rfq
+- name: exchange
 - name: health
 security:
 - ApiKeyAuth: []
@@ -1455,6 +1456,826 @@ paths:
           content:
             application/json:
               schema: *id002
+  /v1/time:
+    get:
+      operationId: getTime
+      tags:
+      - exchange
+      summary: Gateway clock
+      security: *id001
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  epoch_ms:
+                    type: integer
+                  server_time:
+                    type: string
+                    format: date-time
+  /v1/exchange/status:
+    get:
+      operationId: getExchangeStatus
+      tags:
+      - exchange
+      summary: Is the exchange accepting orders? mode OPEN | CANCEL_ONLY | CLOSED, with any maintenance window
+      security: *id001
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: &id006
+                type: object
+                additionalProperties: true
+  /v1/exchange/schedule:
+    get:
+      operationId: getExchangeSchedule
+      tags:
+      - exchange
+      summary: Contracts closing in the next 7 days plus the exchange status
+      security: *id001
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+  /v1/fees:
+    get:
+      operationId: getFees
+      tags:
+      - exchange
+      summary: 'Fee schedule: taker fee and maker incentive in basis points'
+      security: *id001
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+  /v1/markets/stats:
+    get:
+      operationId: getMarketsStats
+      tags:
+      - markets
+      summary: Statistics for several markets
+      security: *id001
+      parameters:
+      - &id007
+        name: tickers
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Comma-separated tickers.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/stats:
+    get:
+      operationId: getMarketStats
+      tags:
+      - markets
+      summary: Last price, 24h volume, high/low, best bid/ask and open interest
+      security: *id001
+      parameters:
+      - *id003
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/trades:
+    get:
+      operationId: getMarketTrades
+      tags:
+      - markets
+      summary: Public trades by time, newest first
+      security: *id001
+      parameters:
+      - *id003
+      - name: from_ts
+        in: query
+        schema:
+          type: string
+      - name: to_ts
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/markets/{ticker}/candles:
+    get:
+      operationId: getMarketCandles
+      tags:
+      - markets
+      summary: OHLC candles, oldest first, in ticks (buckets without trades are omitted)
+      security: *id001
+      parameters:
+      - *id003
+      - name: interval
+        in: query
+        schema:
+          type: string
+          enum:
+          - 1m
+          - 5m
+          - 15m
+          - 1h
+          - 4h
+          - 1d
+          default: 1h
+      - &id009
+        name: from
+        in: query
+        schema:
+          type: string
+        description: RFC 3339 or unix seconds (inclusive).
+      - &id010
+        name: to
+        in: query
+        schema:
+          type: string
+        description: RFC 3339 or unix seconds (exclusive).
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/orderbooks:
+    get:
+      operationId: getOrderbooks
+      tags:
+      - markets
+      summary: Up to 20 order books in one call
+      security: *id001
+      parameters:
+      - *id007
+      - name: depth
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/{order_id}/amend:
+    post:
+      operationId: amendOrder
+      tags:
+      - orders
+      summary: Change price and/or count; replaces the order when it cannot be amended in place (scope trading:write)
+      parameters:
+      - name: order_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                price_ticks:
+                  type: integer
+                count:
+                  type: integer
+                allow_cancel_replace:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  amended_via:
+                    type: string
+                    enum:
+                    - IN_PLACE
+                    - CANCEL_REPLACE
+                  order:
+                    $ref: '#/components/schemas/Order'
+                  cancelled_order:
+                    $ref: '#/components/schemas/Order'
+        '400':
+          description: Rejected or validation error
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/OrderResponse'
+                - *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/batch:
+    post:
+      operationId: batchOrders
+      tags:
+      - orders
+      summary: Place 1-20 orders; not atomic; each order counts as one write against the rate limit
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - orders
+              properties:
+                orders:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items:
+                    $ref: '#/components/schemas/NewOrder'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        status:
+                          type: integer
+                        body: *id006
+                  accepted:
+                    type: integer
+                  failed:
+                    type: integer
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/cancel-batch:
+    post:
+      operationId: cancelOrdersBatch
+      tags:
+      - orders
+      summary: Cancel 1-50 orders by id
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - order_ids
+              properties:
+                order_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: &id008
+                type: object
+                properties:
+                  cancelled:
+                    type: array
+                    items:
+                      type: string
+                  failed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        order_id:
+                          type: string
+                        reject_code:
+                          type: string
+                        reject_reason:
+                          type: string
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: *id002
+  /v1/orders/cancel-all:
+    post:
+      operationId: cancelAllOrders
+      tags:
+      - orders
+      summary: Cancel every working order, optionally for one ticker
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ticker:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id008
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: *id002
+  /v1/positions/{ticker}/close:
+    post:
+      operationId: closePosition
+      tags:
+      - account
+      summary: 'Close (part of) a position with a reduce-only order: market IOC, or a limit order when price_ticks is given;
+        400 NO_POSITION when flat'
+      parameters:
+      - *id003
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count:
+                  type: integer
+                price_ticks:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: NO_POSITION, rejected or validation error
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/OrderResponse'
+                - *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/cancel-after:
+    get:
+      operationId: getCancelAfter
+      tags:
+      - account
+      summary: Dead man's switch state
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  armed:
+                    type: boolean
+                  seconds:
+                    type: integer
+                  cancel_at:
+                    type:
+                    - string
+                    - 'null'
+                    format: date-time
+                  armed_at:
+                    type:
+                    - string
+                    - 'null'
+                    format: date-time
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+    post:
+      operationId: setCancelAfter
+      tags:
+      - account
+      summary: 'Arm (1-3600 s) or disarm (0) the dead man''s switch: every working order is cancelled if the deadline passes
+        unrefreshed'
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - seconds
+              properties:
+                seconds:
+                  type: integer
+                  minimum: 0
+                  maximum: 3600
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/fees:
+    get:
+      operationId: getAccountFees
+      tags:
+      - account
+      summary: Your 30-day maker/taker volume and fees paid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/incentives:
+    get:
+      operationId: getAccountIncentives
+      tags:
+      - account
+      summary: Daily maker incentives paid to you
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/settlements:
+    get:
+      operationId: getAccountSettlements
+      tags:
+      - account
+      summary: Payouts from settled markets
+      parameters:
+      - name: ticker
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/activity:
+    get:
+      operationId: getAccountActivity
+      tags:
+      - account
+      summary: Newest-first feed of fills, order updates, settlements and cash movements
+      parameters:
+      - name: types
+        in: query
+        schema:
+          type: string
+        description: Comma list of fill, order, settlement, cash (default all).
+      - *id009
+      - *id010
+      - name: ticker
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/api-keys/{key_id}/limits:
+    patch:
+      operationId: patchApiKeyLimits
+      tags:
+      - auth
+      summary: Replace a key's trading caps (null removes them)
+      parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - limits
+              properties:
+                limits:
+                  oneOf:
+                  - &id011
+                    type: object
+                    description: Trading caps enforced by the gateway and the order router. A key with limits can only create
+                      keys at least as restricted.
+                    properties:
+                      read_only:
+                        type: boolean
+                      max_order_notional_micro_usdc:
+                        type: integer
+                      max_order_count:
+                        type: integer
+                      max_daily_notional_micro_usdc:
+                        type: integer
+                      allowed_tickers:
+                        type: array
+                        items:
+                          type: string
+                      allowed_event_tickers:
+                        type: array
+                        items:
+                          type: string
+                      ip_allowlist:
+                        type: array
+                        items:
+                          type: string
+                  - type: 'null'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: *id006
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -2142,6 +2963,8 @@ components:
         expires_at:
           type: string
           format: date-time
+        limits:
+          $ref: '#/components/schemas/KeyLimits'
     ApiKeyCreated:
       allOf:
       - $ref: '#/components/schemas/ApiKey'
@@ -2285,3 +3108,4 @@ components:
           - Geopolitics / Shipping
         source:
           type: string
+    KeyLimits: *id011

@@ -616,6 +616,42 @@ impl Client {
         ticker: Option<&str>,
     ) -> Result<(Vec<String>, Vec<(String, String)>)> {
         self.require_mutation()?;
+        // Gateways with the API expansion cancel everything in one call; older
+        // ones answer 404/405 and we fall back to listing and cancelling one by one.
+        match self.cancel_all_server(ticker, None).await {
+            Ok(v) => {
+                let ids = |key: &str| -> Vec<String> {
+                    v[key]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let failed = v["failed"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|f| {
+                                let id = f["order_id"].as_str().unwrap_or("").to_owned();
+                                let why = f["reject_reason"]
+                                    .as_str()
+                                    .filter(|r| !r.is_empty())
+                                    .or_else(|| f["reject_code"].as_str())
+                                    .unwrap_or("rejected")
+                                    .to_owned();
+                                (id, why)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Ok((ids("cancelled"), failed));
+            }
+            Err(e) if matches!(e.status(), Some(404 | 405)) => {}
+            Err(e) => return Err(e),
+        }
         let mut cancelled = Vec::new();
         let mut failed = Vec::new();
         for status in ["OPEN", "PARTIAL", "PENDING"] {
@@ -915,6 +951,383 @@ impl Client {
         self.send(
             Method::POST,
             "v1/market-requests",
+            &[],
+            Some(&body),
+            None,
+            true,
+        )
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Exchange status and extra market data (public)
+    // -----------------------------------------------------------------------
+
+    /// Gateway clock: `{epoch_ms, server_time}`.
+    pub async fn server_time(&self) -> Result<Value> {
+        self.get_json("v1/time", &[]).await
+    }
+
+    /// Whether the exchange accepts orders right now (`mode` OPEN / CANCEL_ONLY / CLOSED).
+    pub async fn exchange_status(&self) -> Result<Value> {
+        self.get_json("v1/exchange/status", &[]).await
+    }
+
+    /// Contracts closing in the next 7 days plus the current exchange status.
+    pub async fn exchange_schedule(&self) -> Result<Value> {
+        self.get_json("v1/exchange/schedule", &[]).await
+    }
+
+    /// The fee schedule (taker fee and maker incentive, in basis points).
+    pub async fn fee_schedule(&self) -> Result<Value> {
+        self.get_json("v1/fees", &[]).await
+    }
+
+    /// Last price, 24h volume, high/low and best bid/ask for one market.
+    pub async fn market_stats(&self, ticker: &str) -> Result<Value> {
+        self.get_json(&format!("v1/markets/{}/stats", enc(ticker)), &[])
+            .await
+    }
+
+    /// Statistics for several markets in one call.
+    pub async fn markets_stats(&self, tickers: &[String]) -> Result<Value> {
+        let joined = tickers.join(",");
+        self.get_json("v1/markets/stats", &[("tickers", joined.as_str())])
+            .await
+    }
+
+    /// Public trades for a market, newest first, optionally within `[from, to)`.
+    pub async fn market_trades(
+        &self,
+        ticker: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = Vec::new();
+        if let Some(v) = from {
+            q.push(("from_ts", v));
+        }
+        if let Some(v) = to {
+            q.push(("to_ts", v));
+        }
+        if let Some(v) = limit.as_deref() {
+            q.push(("limit", v));
+        }
+        self.get_json(&format!("v1/markets/{}/trades", enc(ticker)), &q)
+            .await
+    }
+
+    /// OHLC candles. `interval` is one of 1m, 5m, 15m, 1h, 4h, 1d.
+    pub async fn candles(
+        &self,
+        ticker: &str,
+        interval: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = vec![("interval", interval)];
+        if let Some(v) = from {
+            q.push(("from", v));
+        }
+        if let Some(v) = to {
+            q.push(("to", v));
+        }
+        if let Some(v) = limit.as_deref() {
+            q.push(("limit", v));
+        }
+        self.get_json(&format!("v1/markets/{}/candles", enc(ticker)), &q)
+            .await
+    }
+
+    /// Up to 20 order books in one call.
+    pub async fn orderbooks(&self, tickers: &[String], depth: Option<u32>) -> Result<Value> {
+        let joined = tickers.join(",");
+        let depth = depth.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = vec![("tickers", joined.as_str())];
+        if let Some(v) = depth.as_deref() {
+            q.push(("depth", v));
+        }
+        self.get_json("v1/orderbooks", &q).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Trading: amend, batch, cancel in bulk, close a position
+    // -----------------------------------------------------------------------
+
+    /// Change an order's price and/or count. With `allow_cancel_replace` the
+    /// gateway cancels and re-submits when it cannot amend in place (queue
+    /// priority is lost); the answer says which happened in `amended_via`.
+    pub async fn amend_order(
+        &self,
+        order_id: &str,
+        price_ticks: Option<i64>,
+        count: Option<i64>,
+        allow_cancel_replace: bool,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        if price_ticks.is_none() && count.is_none() {
+            return Err(SarvaexError::Validation(
+                "amend needs a new price and/or a new count".into(),
+            ));
+        }
+        let mut body = json!({ "allow_cancel_replace": allow_cancel_replace });
+        if let Some(p) = price_ticks {
+            body["price_ticks"] = json!(p);
+        }
+        if let Some(c) = count {
+            body["count"] = json!(c);
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("amend"));
+        self.send(
+            Method::POST,
+            &format!("v1/orders/{}/amend", enc(order_id)),
+            &[],
+            Some(&body),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Submit 1-20 orders in one request. Not atomic: the answer lists the
+    /// outcome of each order in `results`, with `accepted` and `failed` counts.
+    pub async fn batch_orders(
+        &self,
+        orders: &[NewOrder],
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        if orders.is_empty() || orders.len() > 20 {
+            return Err(SarvaexError::Validation(
+                "a batch holds 1 to 20 orders".into(),
+            ));
+        }
+        let body = json!({ "orders": orders });
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("batch"));
+        self.send(
+            Method::POST,
+            "v1/orders/batch",
+            &[],
+            Some(&body),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Cancel up to 50 orders by id.
+    pub async fn cancel_batch(
+        &self,
+        order_ids: &[String],
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        if order_ids.is_empty() || order_ids.len() > 50 {
+            return Err(SarvaexError::Validation(
+                "cancel-batch takes 1 to 50 order ids".into(),
+            ));
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("cancel-batch"));
+        self.send(
+            Method::POST,
+            "v1/orders/cancel-batch",
+            &[],
+            Some(&json!({ "order_ids": order_ids })),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Cancel every working order, optionally for one ticker (single request).
+    pub async fn cancel_all_server(
+        &self,
+        ticker: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        let mut body = json!({});
+        if let Some(t) = ticker {
+            body["ticker"] = json!(t);
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("cancel-all"));
+        self.send(
+            Method::POST,
+            "v1/orders/cancel-all",
+            &[],
+            Some(&body),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Close (part of) a position with a reduce-only order: a market IOC by
+    /// default, a limit order when `price_ticks` is given.
+    pub async fn close_position(
+        &self,
+        ticker: &str,
+        count: Option<i64>,
+        price_ticks: Option<i64>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        let mut body = json!({});
+        if let Some(c) = count {
+            body["count"] = json!(c);
+        }
+        if let Some(p) = price_ticks {
+            body["price_ticks"] = json!(p);
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("close"));
+        self.send(
+            Method::POST,
+            &format!("v1/positions/{}/close", enc(ticker)),
+            &[],
+            Some(&body),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Account: dead man's switch, fees, activity, settlements, key limits
+    // -----------------------------------------------------------------------
+
+    /// Current dead man's switch: `{armed, seconds, cancel_at, armed_at}`.
+    pub async fn cancel_after_status(&self) -> Result<Value> {
+        self.get_auth("v1/account/cancel-after", &[]).await
+    }
+
+    /// Arm the dead man's switch (1-3600 s): every working order is cancelled
+    /// if the deadline passes without a refresh. `0` disarms it.
+    pub async fn set_cancel_after(
+        &self,
+        seconds: u32,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        if seconds > 3600 {
+            return Err(SarvaexError::Validation(
+                "cancel-after is 0 (off) or 1 to 3600 seconds".into(),
+            ));
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("cancel-after"));
+        self.send(
+            Method::POST,
+            "v1/account/cancel-after",
+            &[],
+            Some(&json!({ "seconds": seconds })),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Your 30-day maker/taker volume and the fees you paid.
+    pub async fn account_fees(&self) -> Result<Value> {
+        self.get_auth("v1/account/fees", &[]).await
+    }
+
+    /// Daily maker incentives paid to you.
+    pub async fn account_incentives(&self) -> Result<Value> {
+        self.get_auth("v1/account/incentives", &[]).await
+    }
+
+    /// Payouts from settled markets.
+    pub async fn account_settlements(
+        &self,
+        ticker: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = Vec::new();
+        if let Some(t) = ticker {
+            q.push(("ticker", t));
+        }
+        if let Some(l) = limit.as_deref() {
+            q.push(("limit", l));
+        }
+        self.get_auth("v1/account/settlements", &q).await
+    }
+
+    /// One newest-first feed of fills, order updates, settlements and cash movements.
+    pub async fn account_activity(
+        &self,
+        types: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        ticker: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = Vec::new();
+        if let Some(v) = types {
+            q.push(("types", v));
+        }
+        if let Some(v) = from {
+            q.push(("from", v));
+        }
+        if let Some(v) = to {
+            q.push(("to", v));
+        }
+        if let Some(v) = ticker {
+            q.push(("ticker", v));
+        }
+        if let Some(v) = limit.as_deref() {
+            q.push(("limit", v));
+        }
+        self.get_auth("v1/account/activity", &q).await
+    }
+
+    /// Create an API key with trading caps (`limits` is the gateway's limits object).
+    pub async fn create_api_key_with_limits(
+        &self,
+        name: &str,
+        scopes: &[&str],
+        expires_at: Option<&str>,
+        limits: &Value,
+    ) -> Result<ApiKeyCreated> {
+        let mut body = json!({ "name": name, "scopes": scopes, "limits": limits });
+        if let Some(exp) = expires_at {
+            body["expires_at"] = json!(exp);
+        }
+        self.send(
+            Method::POST,
+            "v1/account/api-keys",
+            &[],
+            Some(&body),
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// Replace a key's limits; `None` removes them all.
+    pub async fn set_api_key_limits(&self, key_id: &str, limits: Option<&Value>) -> Result<Value> {
+        self.require_mutation()?;
+        let body = json!({ "limits": limits.cloned().unwrap_or(Value::Null) });
+        self.send(
+            Method::PATCH,
+            &format!("v1/account/api-keys/{}/limits", enc(key_id)),
             &[],
             Some(&body),
             None,

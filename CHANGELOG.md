@@ -2,6 +2,21 @@
 
 Versions follow [semver](https://semver.org). The version lives in one place: `[workspace.package] version` in `Cargo.toml`.
 
+## 0.2.0
+
+Everything the exchange added to its API, from the CLI, SDK and MCP server.
+
+- `orders amend` (in place when possible, otherwise cancel and replace), `orders batch` (1-20 orders from a JSON file), `orders cancel-batch`, and `orders cancel-all` as one request (older gateways fall back to cancelling one by one).
+- `positions close`: a reduce-only close of all or part of a position.
+- `account cancel-after`: the dead man's switch, which cancels every working order unless refreshed.
+- `account activity`, `account fees`, `account incentives`, `account settlements`.
+- `exchange status | schedule | time | fees`: is trading open, what closes soon, the fee schedule.
+- `markets candles | trades | stats | books`.
+- `auth keys create` and `auth keys limits`: API keys with trading caps the exchange enforces (`--max-order-count`, `--max-order-notional-usdc`, `--max-daily-notional-usdc`, `--allow-ticker`, `--read-only`).
+- `stream --orders --lifecycle --exchange --ticker-stats --candles`: the new WebSocket channels.
+- MCP tools: `get_exchange_status`, `get_fee_schedule`, `get_market_stats`, `get_candles`, `get_account_activity`, `amend_order`, `cancel_orders`, `close_position`, `set_cancel_after`.
+- OpenAPI spec 1.1.0 covers all of the above. The mock gateway implements them for offline testing.
+
 ## 0.1.0
 
 First public release.

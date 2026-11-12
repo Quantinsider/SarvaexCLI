@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod expansion;
+
 pub const API_KEY_TRADER: &str = "svx_live_testkey0000000000000000000000000000000000000000000001";
 pub const API_KEY_READONLY: &str = "svx_live_readonly000000000000000000000000000000000000000000002";
 pub const USER_TRADER: &str = "alice_1";
@@ -42,6 +44,8 @@ struct Inner {
     in_progress_seen: HashMap<String, u32>,
     rate_limit_hits: u32,
     seq: i64,
+    /// Small per-feature state for the expanded API (dead man's switch, ...).
+    extra: HashMap<String, Value>,
     pub calls: Vec<String>,
 }
 
@@ -179,6 +183,7 @@ impl MockGateway {
                 in_progress_seen: HashMap::new(),
                 rate_limit_hits: 0,
                 seq: 8200,
+                extra: HashMap::new(),
                 calls: Vec::new(),
             })),
         }
@@ -221,6 +226,7 @@ impl MockGateway {
             .route("/v1/account/history", get(|| async { Json(json!({"entries":[],"next_cursor":""})) }))
             .route("/v1/positions", get(positions))
             .route("/v1/demo/deposits/credit", post(demo_credit))
+            .merge(expansion::routes())
             .layer(axum::middleware::from_fn_with_state(self.clone(), record))
             .with_state(self.clone())
     }

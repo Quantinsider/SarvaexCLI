@@ -441,6 +441,93 @@ async fn full_oauth_flow_and_per_user_tool_calls() {
 }
 
 #[tokio::test]
+async fn expanded_api_tools_work_with_a_direct_api_key() {
+    let h = Harness::start().await;
+    let key = API_KEY_TRADER;
+    let (status, v) = h.mcp(key, init_msg()).await;
+    assert_eq!(status, 200, "{v}");
+
+    // Preflight reads.
+    let (_, v) = h.call_tool(key, "get_exchange_status", json!({})).await;
+    let st = tool_text(&v);
+    assert_eq!(st["mode"], "OPEN");
+    assert_eq!(st["new_orders_allowed"], true);
+    let (_, v) = h.call_tool(key, "get_fee_schedule", json!({})).await;
+    assert_eq!(tool_text(&v)["taker_fee_bps"], 0);
+
+    // Rest an order, amend it in place, then cancel it through the batch tool.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "place_order",
+            json!({"ticker":"SX-FEDDEC-26OCT-H25","side":"yes","action":"buy","count":3,"price":"0.10"}),
+        )
+        .await;
+    let placed = tool_text(&v);
+    assert_eq!(placed["status"], "OPEN", "{placed}");
+    let id = placed["order"]["order_id"].as_str().unwrap().to_owned();
+    let (_, v) = h
+        .call_tool(key, "amend_order", json!({"order_id": id, "price": "0.12"}))
+        .await;
+    let amended = tool_text(&v);
+    assert_eq!(amended["amended_via"], "IN_PLACE", "{amended}");
+    assert_eq!(amended["order"]["price_ticks"], 12);
+    let (_, v) = h
+        .call_tool(key, "cancel_orders", json!({"order_ids": [id]}))
+        .await;
+    assert_eq!(tool_text(&v)["cancelled"][0], id.as_str());
+
+    // Closing with no position is a tool error carrying the gateway's code.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "close_position",
+            json!({"ticker":"SX-FEDDEC-26OCT-H25"}),
+        )
+        .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("NO_POSITION"),
+        "{v}"
+    );
+
+    // Dead man's switch on and off.
+    let (_, v) = h
+        .call_tool(key, "set_cancel_after", json!({"seconds": 30}))
+        .await;
+    assert_eq!(tool_text(&v)["armed"], true);
+    let (_, v) = h
+        .call_tool(key, "set_cancel_after", json!({"seconds": 0}))
+        .await;
+    assert_eq!(tool_text(&v)["armed"], false);
+
+    // Market data and the activity feed.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "get_market_stats",
+            json!({"ticker":"SX-FEDDEC-26OCT-H25"}),
+        )
+        .await;
+    assert_eq!(tool_text(&v)["ticker"], "SX-FEDDEC-26OCT-H25");
+    let (_, v) = h
+        .call_tool(
+            key,
+            "get_candles",
+            json!({"ticker":"SX-FEDDEC-26OCT-H25","interval":"5m"}),
+        )
+        .await;
+    assert_eq!(tool_text(&v)["interval"], "5m");
+    let (_, v) = h
+        .call_tool(key, "get_account_activity", json!({"types":"order,cash"}))
+        .await;
+    assert!(!tool_text(&v)["activity"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn host_validation_rejects_unknown_hosts() {
     let h = Harness::start().await;
     let resp = h

@@ -64,6 +64,45 @@ Add `--json` for machine output (automatic when stdout is not a TTY). Errors are
 Exit codes: `0` ok · `1` error · `2` usage/validation · `3` auth · `4` order rejected by the
 exchange · `5` rate limited · `6` network · `7` blocked by a local safety guard.
 
+## More commands
+
+```bash
+sarvaex exchange status                  # is trading open? (OPEN / CANCEL_ONLY / CLOSED, maintenance window)
+sarvaex exchange schedule | time | fees
+sarvaex orders amend <order_id> --price 0.52          # in place when possible, else cancel + replace
+sarvaex orders batch orders.json                      # 1-20 orders from a JSON file (or - for stdin)
+sarvaex orders cancel-batch <id> <id> …               # up to 50 ids in one call
+sarvaex orders cancel-all [--ticker SX-…]             # one request on current gateways
+sarvaex positions close SX-…                          # reduce-only; --price for a limit order
+sarvaex account activity --types fill,order           # fills, orders, settlements and cash in one feed
+sarvaex account fees | incentives | settlements
+sarvaex account cancel-after set 60                   # dead man's switch: cancel everything unless refreshed
+sarvaex markets stats | candles | trades | books      # market data beyond the book
+sarvaex stream --orders --exchange --lifecycle        # live order updates, exchange mode, market open/close
+```
+
+A batch file is a JSON array; prices are in display units like everywhere else:
+
+```json
+[
+  {"ticker": "SX-FEDDEC-26OCT-H25", "side": "yes", "action": "buy", "price": "0.48", "count": 5},
+  {"ticker": "SX-FEDDEC-26OCT-H25", "side": "yes", "action": "sell", "price_ticks": 55, "count": 5, "tif": "gtc"}
+]
+```
+
+### API keys with trading caps
+
+Create keys the exchange itself will hold to a limit, for bots and agents:
+
+```bash
+sarvaex auth keys create --name bot --max-order-count 20 --max-order-notional-usdc 50 \
+  --max-daily-notional-usdc 500 --allow-ticker SX-FEDDEC-26OCT-H25
+sarvaex auth keys limits <key_id> --read-only          # or --clear to remove every limit
+```
+
+An order beyond a limit is refused with `403 KEY_LIMIT_EXCEEDED`. A key with limits can only
+create keys that are at least as restricted as itself.
+
 ## Safety guards for agents
 
 Set these in the environment (or `sarvaex config set …`) and the client refuses to send anything
@@ -127,7 +166,9 @@ Header-capable MCP clients can skip OAuth: `Authorization: Bearer svx_live_…`.
 `get_open_interest`, `get_event`, `get_resolution`, `get_settlement`, `get_balance`,
 `get_account_risk`, `get_account_margin`, `list_positions`, `get_fill_history`,
 `get_ledger_history`, `list_orders`, `get_order`, `place_order` (with `dry_run`), `cancel_order`,
-`cancel_all_orders`, `preview_margin`, `credit_demo_funds`, `get_trading_rules`.
+`cancel_all_orders`, `preview_margin`, `credit_demo_funds`, `get_trading_rules`, plus
+`get_exchange_status`, `get_fee_schedule`, `get_market_stats`, `get_candles`,
+`get_account_activity`, `amend_order`, `cancel_orders`, `close_position`, `set_cancel_after`.
 
 ## Developing
 

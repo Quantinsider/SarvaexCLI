@@ -228,6 +228,68 @@ pub struct CancelAllParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CandlesParams {
+    pub ticker: String,
+    /// `1m`, `5m`, `15m`, `1h` (default), `4h` or `1d`.
+    pub interval: Option<String>,
+    /// Start of the range (RFC 3339 or unix seconds).
+    pub from: Option<String>,
+    /// End of the range, exclusive.
+    pub to: Option<String>,
+    /// Candles to return, 1–1000 (default 100).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActivityParams {
+    /// Comma list of `fill`, `order`, `settlement`, `cash` (default all).
+    pub types: Option<String>,
+    pub from: Option<String>,
+    /// Exclusive upper bound; pass the previous page's `next_to` to page back.
+    pub to: Option<String>,
+    pub ticker: Option<String>,
+    /// 1–200 (default 50).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AmendOrderParams {
+    pub order_id: String,
+    /// New price in display units (`0.51`, `51c`, futures display units).
+    pub price: Option<String>,
+    /// New price in raw ticks (alternative to `price`).
+    pub price_ticks: Option<i64>,
+    /// New total contract count.
+    pub count: Option<i64>,
+    /// Default true: when the order cannot be amended in place, cancel it and
+    /// submit a replacement (queue priority is lost). Set false to fail instead.
+    pub allow_cancel_replace: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CancelOrdersParams {
+    /// 1–50 order ids.
+    pub order_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ClosePositionParams {
+    pub ticker: String,
+    /// Contracts to close (default: the whole position).
+    pub count: Option<i64>,
+    /// Limit price in display units; omit for a market order.
+    pub price: Option<String>,
+    /// Limit price in raw ticks (alternative to `price`).
+    pub price_ticks: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CancelAfterParams {
+    /// 1–3600 arms the dead man's switch; 0 disarms it.
+    pub seconds: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PreviewMarginParams {
     pub ticker: String,
     pub side: String,
@@ -981,6 +1043,194 @@ impl SarvaexMcp {
         ok(
             json!({ "ok": r.ok, "balance_usdc": price::micro_to_usdc(r.balance.total_micro_usdc), "balance": r.balance }),
         )
+    }
+
+    #[tool(
+        description = "Is the exchange accepting orders? Returns mode OPEN, CANCEL_ONLY or CLOSED, whether new orders and cancels are allowed, and any maintenance window. Check this before trading.",
+        annotations(
+            title = "Exchange status",
+            read_only_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn get_exchange_status(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(client.exchange_status().await))
+    }
+
+    #[tool(
+        description = "The fee schedule: taker fee and maker incentive in basis points (0 while trading is free), and how the fee is computed.",
+        annotations(title = "Fee schedule", read_only_hint = true, open_world_hint = true)
+    )]
+    async fn get_fee_schedule(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(client.fee_schedule().await))
+    }
+
+    #[tool(
+        description = "Market statistics: last price, 24h volume/trades/high/low/change, best bid/ask and open interest. Prices are in ticks.",
+        annotations(title = "Market stats", read_only_hint = true, open_world_hint = true)
+    )]
+    async fn get_market_stats(
+        &self,
+        Parameters(p): Parameters<TickerParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(client.market_stats(p.ticker.trim()).await))
+    }
+
+    #[tool(
+        description = "OHLC candles for a market, oldest first (prices in ticks; buckets without trades are omitted).",
+        annotations(title = "Candles", read_only_hint = true, open_world_hint = true)
+    )]
+    async fn get_candles(
+        &self,
+        Parameters(p): Parameters<CandlesParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(
+            client
+                .candles(
+                    p.ticker.trim(),
+                    p.interval.as_deref().unwrap_or("1h"),
+                    p.from.as_deref(),
+                    p.to.as_deref(),
+                    Some(p.limit.unwrap_or(100).clamp(1, 1000)),
+                )
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Newest-first feed of everything that happened on the account: fills, order updates, settlements and cash movements. Page back with next_to.",
+        annotations(title = "Account activity", read_only_hint = true)
+    )]
+    async fn get_account_activity(
+        &self,
+        Parameters(p): Parameters<ActivityParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(
+            client
+                .account_activity(
+                    p.types.as_deref(),
+                    p.from.as_deref(),
+                    p.to.as_deref(),
+                    p.ticker.as_deref(),
+                    Some(p.limit.unwrap_or(50).clamp(1, 200)),
+                )
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Change a working order's price and/or count. If it cannot be amended in place it is cancelled and replaced (new order id, queue priority lost) unless allow_cancel_replace is false. The result's amended_via says which happened; verify with get_order.",
+        annotations(
+            title = "Amend order",
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn amend_order(
+        &self,
+        Parameters(p): Parameters<AmendOrderParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        let ticks = match (p.price_ticks, p.price.as_deref()) {
+            (Some(t), _) => Some(t),
+            (None, Some(price)) => {
+                let order = try_tool!(client.get_order(p.order_id.trim()).await);
+                let contract = try_tool!(client.get_market(&order.ticker).await);
+                Some(try_tool!(
+                    PriceEncoding::for_contract(&contract).parse(price)
+                ))
+            }
+            (None, None) => None,
+        };
+        ok(try_tool!(
+            client
+                .amend_order(
+                    p.order_id.trim(),
+                    ticks,
+                    p.count,
+                    p.allow_cancel_replace.unwrap_or(true),
+                    None,
+                )
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Cancel up to 50 orders by id in one call. Returns which were cancelled and which failed.",
+        annotations(
+            title = "Cancel orders",
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn cancel_orders(
+        &self,
+        Parameters(p): Parameters<CancelOrdersParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        ok(try_tool!(client.cancel_batch(&p.order_ids, None).await))
+    }
+
+    #[tool(
+        description = "Close all or part of a position with a reduce-only order (market IOC by default, a limit order when a price is given). Errors with NO_POSITION when flat.",
+        annotations(
+            title = "Close position",
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn close_position(
+        &self,
+        Parameters(p): Parameters<ClosePositionParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        let contract = try_tool!(client.get_market(p.ticker.trim()).await);
+        let limit = match (p.price_ticks, p.price.as_deref()) {
+            (Some(t), _) => Some(t),
+            (None, Some(price)) => Some(try_tool!(
+                PriceEncoding::for_contract(&contract).parse(price)
+            )),
+            (None, None) => None,
+        };
+        ok(try_tool!(
+            client
+                .close_position(&contract.ticker, p.count, limit, None)
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Dead man's switch: arm it (1-3600 seconds) and every working order is cancelled automatically if the deadline passes without a refresh; placing an order or calling this again pushes the deadline out. 0 disarms. Use it while running unattended.",
+        annotations(
+            title = "Dead man's switch",
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn set_cancel_after(
+        &self,
+        Parameters(p): Parameters<CancelAfterParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        ok(try_tool!(client.set_cancel_after(p.seconds, None).await))
     }
 
     #[tool(

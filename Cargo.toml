@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/sarvaex-sdk", "crates/sarvaex-cli", "crates/sarvaex-mcp", "crates/sarvaex-mock-gateway"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -11,8 +11,8 @@ repository = "https://github.com/Quantinsider/SarvaexCLI"
 authors = ["SarvaEX"]
 
 [workspace.dependencies]
-sarvaex-sdk = { path = "crates/sarvaex-sdk", version = "0.1.0" }
-sarvaex-mcp = { path = "crates/sarvaex-mcp", version = "0.1.0" }
+sarvaex-sdk = { path = "crates/sarvaex-sdk", version = "0.2.0" }
+sarvaex-mcp = { path = "crates/sarvaex-mcp", version = "0.2.0" }
 sarvaex-mock-gateway = { path = "crates/sarvaex-mock-gateway" }
 
 anyhow = "1"

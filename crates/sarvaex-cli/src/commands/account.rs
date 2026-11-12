@@ -187,6 +187,19 @@ pub async fn account(ctx: &Ctx, cmd: AccountCmd) -> Result<i32> {
                 },
             );
         }
+        AccountCmd::Fees => return super::expansion::account_fees(ctx).await,
+        AccountCmd::Activity {
+            types,
+            from,
+            to,
+            ticker,
+            limit,
+        } => return super::expansion::activity(ctx, types, from, to, ticker, limit).await,
+        AccountCmd::Settlements { ticker, limit } => {
+            return super::expansion::settlements(ctx, ticker, limit).await;
+        }
+        AccountCmd::Incentives => return super::expansion::incentives(ctx).await,
+        AccountCmd::CancelAfter(cmd) => return super::expansion::cancel_after(ctx, cmd).await,
     }
     Ok(exit::OK)
 }
@@ -230,6 +243,23 @@ pub async fn positions(ctx: &Ctx, cmd: PositionsCmd) -> Result<i32> {
                     }
                 },
             );
+        }
+        PositionsCmd::Close {
+            ticker,
+            count,
+            price,
+            price_ticks,
+            idempotency_key,
+        } => {
+            return super::expansion::close_position(
+                ctx,
+                ticker,
+                count,
+                price,
+                price_ticks,
+                idempotency_key,
+            )
+            .await;
         }
         PositionsCmd::Get { ticker } => {
             let p = ctx.client().position(&ticker).await?;

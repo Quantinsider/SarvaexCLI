@@ -142,6 +142,9 @@ pub enum Command {
     MarketRequests(MarketRequestsCmd),
     /// Stream live book updates, trades and your fills (NDJSON)
     Stream(StreamArgs),
+    /// Exchange status, schedule, server time and fee schedule
+    #[command(subcommand)]
+    Exchange(ExchangeCmd),
     /// Gateway health overview
     Health,
     /// Raw API call (escape hatch): `sarvaex api GET /v1/markets?limit=1`
@@ -242,9 +245,50 @@ pub enum KeysCmd {
         /// RFC 3339 expiry
         #[arg(long)]
         expires_at: Option<String>,
+        #[command(flatten)]
+        limits: LimitsArgs,
+    },
+    /// Change the trading caps of a key (replaces its limits)
+    Limits {
+        key_id: String,
+        #[command(flatten)]
+        limits: LimitsArgs,
+        /// Remove every limit from the key
+        #[arg(long, conflicts_with_all = ["read_only", "max_order_count", "max_order_notional_usdc", "max_daily_notional_usdc", "allow_ticker", "allow_event", "ip_allow", "limits_json"])]
+        clear: bool,
     },
     /// Revoke a key by id
     Revoke { key_id: String },
+}
+
+/// Trading caps enforced by the exchange on one API key. A key can only create
+/// keys that are at least as restricted as itself.
+#[derive(Debug, Args, Default, Clone)]
+pub struct LimitsArgs {
+    /// The key may read but never trade or change anything
+    #[arg(long)]
+    pub read_only: bool,
+    /// Largest number of contracts in one order
+    #[arg(long)]
+    pub max_order_count: Option<i64>,
+    /// Largest amount at risk in one order, in USDC
+    #[arg(long)]
+    pub max_order_notional_usdc: Option<f64>,
+    /// Largest total amount at risk per UTC day, in USDC
+    #[arg(long)]
+    pub max_daily_notional_usdc: Option<f64>,
+    /// Only these tickers may be traded (repeat the flag)
+    #[arg(long)]
+    pub allow_ticker: Vec<String>,
+    /// Only contracts of these events may be traded (repeat the flag)
+    #[arg(long)]
+    pub allow_event: Vec<String>,
+    /// Only requests from these IP addresses are accepted (repeat the flag)
+    #[arg(long)]
+    pub ip_allow: Vec<String>,
+    /// The raw limits object as JSON (overrides the flags above)
+    #[arg(long)]
+    pub limits_json: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +326,42 @@ pub enum MarketsCmd {
     },
     /// Open interest
     Oi { ticker: String },
+    /// OHLC candles (oldest first), built from fills
+    Candles {
+        ticker: String,
+        /// 1m | 5m | 15m | 1h | 4h | 1d
+        #[arg(long, default_value = "1h")]
+        interval: String,
+        /// RFC 3339 or unix seconds
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
+    /// Recent public trades within an optional time range
+    Trades {
+        ticker: String,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+    /// Last price, 24h volume, high/low and best bid/ask (one or many markets)
+    Stats {
+        #[arg(required = true)]
+        tickers: Vec<String>,
+    },
+    /// Several order books in one call (up to 20 markets)
+    Books {
+        #[arg(required = true)]
+        tickers: Vec<String>,
+        #[arg(long, default_value = "5")]
+        depth: u32,
+    },
     /// Settlement result (after settlement)
     Settlement { ticker: String },
 }
@@ -376,6 +456,37 @@ pub enum OrdersCmd {
     CancelAll {
         #[arg(long)]
         ticker: Option<String>,
+    },
+    /// Change an order's price and/or count (queue priority is lost when it cannot be amended in place)
+    Amend {
+        order_id: String,
+        /// New price (0.51, 51c, or futures display units)
+        #[arg(long, short = 'p', conflicts_with = "price_ticks")]
+        price: Option<String>,
+        #[arg(long)]
+        price_ticks: Option<i64>,
+        /// New total contract count
+        #[arg(long, short = 'n')]
+        count: Option<i64>,
+        /// Fail instead of cancelling and re-submitting when an in-place amend is not possible
+        #[arg(long)]
+        no_cancel_replace: bool,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Place 1-20 orders from a JSON file (or `-` for stdin): [{"ticker","side","action","price"|"price_ticks","count","tif"?}]
+    Batch {
+        /// Path to the JSON array, or `-` for stdin
+        file: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Cancel up to 50 orders by id in one call
+    CancelBatch {
+        #[arg(required = true)]
+        order_ids: Vec<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
 }
 
@@ -509,6 +620,20 @@ pub enum PositionsCmd {
     Get {
         ticker: String,
     },
+    /// Close a position with a reduce-only order (market IOC unless a price is given)
+    Close {
+        ticker: String,
+        /// Contracts to close (default: the whole position)
+        #[arg(long, short = 'n')]
+        count: Option<i64>,
+        /// Limit price instead of a market order
+        #[arg(long, short = 'p', conflicts_with = "price_ticks")]
+        price: Option<String>,
+        #[arg(long)]
+        price_ticks: Option<i64>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -539,6 +664,57 @@ pub enum AccountCmd {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Your 30-day volume and the fees you paid
+    Fees,
+    /// One newest-first feed of fills, order updates, settlements and cash movements
+    Activity {
+        /// Comma list of fill,order,settlement,cash (default all)
+        #[arg(long)]
+        types: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        /// Exclusive upper bound; pass the previous page's `next_to` to page back
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        ticker: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+    /// Payouts from settled markets
+    Settlements {
+        #[arg(long)]
+        ticker: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+    /// Daily maker incentives paid to you
+    Incentives,
+    /// Dead man's switch: cancel every working order unless refreshed in time
+    #[command(subcommand)]
+    CancelAfter(CancelAfterCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CancelAfterCmd {
+    /// Show whether the switch is armed and when it fires
+    Status,
+    /// Arm it: working orders are cancelled in SECONDS (1-3600) unless you refresh it or place an order
+    Set { seconds: u32 },
+    /// Disarm it
+    Off,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExchangeCmd {
+    /// Is the exchange accepting orders? (mode OPEN | CANCEL_ONLY | CLOSED, maintenance window)
+    Status,
+    /// Contracts closing in the next 7 days and the exchange status
+    Schedule,
+    /// Gateway clock
+    Time,
+    /// Fee schedule: taker fee and maker incentive in basis points
+    Fees,
 }
 
 #[derive(Debug, Subcommand)]
@@ -647,8 +823,8 @@ pub enum MarketRequestsCmd {
 
 #[derive(Debug, Args)]
 pub struct StreamArgs {
-    /// One or more tickers
-    #[arg(required = true)]
+    /// Tickers for the market/trade stream and the --ticker-stats / --candles channels
+    #[arg(required_unless_present_any = ["orders", "lifecycle", "exchange"])]
     pub tickers: Vec<String>,
     /// Also subscribe to your private fills (needs websocket:read)
     #[arg(long)]
@@ -659,6 +835,21 @@ pub struct StreamArgs {
     /// Stop after N events (0 = run until interrupted)
     #[arg(long, default_value = "0")]
     pub max_events: u64,
+    /// Your own order updates (new, partial, filled, cancelled, expired); needs websocket:read
+    #[arg(long)]
+    pub orders: bool,
+    /// Market lifecycle events (a contract opening, closing or settling), all markets
+    #[arg(long)]
+    pub lifecycle: bool,
+    /// Exchange mode changes (OPEN, CANCEL_ONLY, CLOSED, maintenance windows)
+    #[arg(long)]
+    pub exchange: bool,
+    /// 24h statistics for each ticker as they change
+    #[arg(long)]
+    pub ticker_stats: bool,
+    /// Candles for each ticker at this interval (1m, 5m, 15m, 1h, 4h, 1d)
+    #[arg(long)]
+    pub candles: Option<String>,
 }
 
 #[derive(Debug, Args)]

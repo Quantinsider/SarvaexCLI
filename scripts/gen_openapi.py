@@ -259,11 +259,69 @@ paths = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# API expansion (fees, key limits, amend/batch/bulk cancel, close position, dead man's
+# switch, market data, activity feed, exchange status). Bodies are described loosely
+# (additionalProperties) where the gateway may add fields; see API.md for the full shapes.
+# ---------------------------------------------------------------------------
+OBJ = {"type": "object", "additionalProperties": True}
+FROM_TO = [
+    {"name": "from", "in": "query", "schema": {"type": "string"}, "description": "RFC 3339 or unix seconds (inclusive)."},
+    {"name": "to", "in": "query", "schema": {"type": "string"}, "description": "RFC 3339 or unix seconds (exclusive)."},
+]
+ORDER_ID = {"name": "order_id", "in": "path", "required": True, "schema": {"type": "string"}}
+KEY_ID = {"name": "key_id", "in": "path", "required": True, "schema": {"type": "string"}}
+LIMITS = {
+    "type": "object",
+    "description": "Trading caps enforced by the gateway and the order router. A key with limits can only create keys at least as restricted.",
+    "properties": {
+        "read_only": {"type": "boolean"},
+        "max_order_notional_micro_usdc": {"type": "integer"},
+        "max_order_count": {"type": "integer"},
+        "max_daily_notional_micro_usdc": {"type": "integer"},
+        "allowed_tickers": {"type": "array", "items": {"type": "string"}},
+        "allowed_event_tickers": {"type": "array", "items": {"type": "string"}},
+        "ip_allowlist": {"type": "array", "items": {"type": "string"}},
+    },
+}
+body = lambda schema: {"required": True, "content": {"application/json": {"schema": schema}}}  # noqa: E731
+RESULTS = {"type": "object", "properties": {"results": {"type": "array", "items": {"type": "object", "properties": {"index": {"type": "integer"}, "status": {"type": "integer"}, "body": OBJ}}}, "accepted": {"type": "integer"}, "failed": {"type": "integer"}}}
+CANCELLED = {"type": "object", "properties": {"cancelled": {"type": "array", "items": {"type": "string"}}, "failed": {"type": "array", "items": {"type": "object", "properties": {"order_id": {"type": "string"}, "reject_code": {"type": "string"}, "reject_reason": {"type": "string"}}}}}}
+TICKERS = {"name": "tickers", "in": "query", "required": True, "schema": {"type": "string"}, "description": "Comma-separated tickers."}
+
+paths.update({
+    "/v1/time": {"get": {"operationId": "getTime", "tags": ["exchange"], "summary": "Gateway clock", "security": PUB, "responses": {"200": resp({"type": "object", "properties": {"epoch_ms": {"type": "integer"}, "server_time": {"type": "string", "format": "date-time"}}})}}},
+    "/v1/exchange/status": {"get": {"operationId": "getExchangeStatus", "tags": ["exchange"], "summary": "Is the exchange accepting orders? mode OPEN | CANCEL_ONLY | CLOSED, with any maintenance window", "security": PUB, "responses": {"200": resp(OBJ)}}},
+    "/v1/exchange/schedule": {"get": {"operationId": "getExchangeSchedule", "tags": ["exchange"], "summary": "Contracts closing in the next 7 days plus the exchange status", "security": PUB, "responses": {"200": resp(OBJ)}}},
+    "/v1/fees": {"get": {"operationId": "getFees", "tags": ["exchange"], "summary": "Fee schedule: taker fee and maker incentive in basis points", "security": PUB, "responses": {"200": resp(OBJ)}}},
+    "/v1/markets/stats": {"get": {"operationId": "getMarketsStats", "tags": ["markets"], "summary": "Statistics for several markets", "security": PUB, "parameters": [TICKERS], "responses": {"200": resp(OBJ), **errs(400)}}},
+    "/v1/markets/{ticker}/stats": {"get": {"operationId": "getMarketStats", "tags": ["markets"], "summary": "Last price, 24h volume, high/low, best bid/ask and open interest", "security": PUB, "parameters": [TICKER], "responses": {"200": resp(OBJ), **errs(404)}}},
+    "/v1/markets/{ticker}/trades": {"get": {"operationId": "getMarketTrades", "tags": ["markets"], "summary": "Public trades by time, newest first", "security": PUB, "parameters": [TICKER, {"name": "from_ts", "in": "query", "schema": {"type": "string"}}, {"name": "to_ts", "in": "query", "schema": {"type": "string"}}, LIMIT(100, 1000)], "responses": {"200": resp(OBJ), **errs(404)}}},
+    "/v1/markets/{ticker}/candles": {"get": {"operationId": "getMarketCandles", "tags": ["markets"], "summary": "OHLC candles, oldest first, in ticks (buckets without trades are omitted)", "security": PUB, "parameters": [TICKER, {"name": "interval", "in": "query", "schema": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"], "default": "1h"}}, *FROM_TO, LIMIT(100, 1000)], "responses": {"200": resp(OBJ), **errs(400, 404)}}},
+    "/v1/orderbooks": {"get": {"operationId": "getOrderbooks", "tags": ["markets"], "summary": "Up to 20 order books in one call", "security": PUB, "parameters": [TICKERS, {"name": "depth", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10}}], "responses": {"200": resp(OBJ), **errs(400)}}},
+    "/v1/orders/{order_id}/amend": {"post": {"operationId": "amendOrder", "tags": ["orders"], "summary": "Change price and/or count; replaces the order when it cannot be amended in place (scope trading:write)", "parameters": [ORDER_ID, IDEMP], "requestBody": body({"type": "object", "properties": {"price_ticks": {"type": "integer"}, "count": {"type": "integer"}, "allow_cancel_replace": {"type": "boolean", "default": True}}}), "responses": {"200": resp({"type": "object", "properties": {"amended_via": {"type": "string", "enum": ["IN_PLACE", "CANCEL_REPLACE"]}, "order": ref("Order"), "cancelled_order": ref("Order")}}), "400": resp({"oneOf": [ref("OrderResponse"), ERR]}, "Rejected or validation error"), **errs(401, 403, 404, 409)}}},
+    "/v1/orders/batch": {"post": {"operationId": "batchOrders", "tags": ["orders"], "summary": "Place 1-20 orders; not atomic; each order counts as one write against the rate limit", "parameters": [IDEMP], "requestBody": body({"type": "object", "required": ["orders"], "properties": {"orders": {"type": "array", "minItems": 1, "maxItems": 20, "items": ref("NewOrder")}}}), "responses": {"200": resp(RESULTS), **errs(400, 401, 403, 409, 429)}}},
+    "/v1/orders/cancel-batch": {"post": {"operationId": "cancelOrdersBatch", "tags": ["orders"], "summary": "Cancel 1-50 orders by id", "parameters": [IDEMP], "requestBody": body({"type": "object", "required": ["order_ids"], "properties": {"order_ids": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string"}}}}), "responses": {"200": resp(CANCELLED), **errs(400, 401, 403, 409, 429)}}},
+    "/v1/orders/cancel-all": {"post": {"operationId": "cancelAllOrders", "tags": ["orders"], "summary": "Cancel every working order, optionally for one ticker", "parameters": [IDEMP], "requestBody": body({"type": "object", "properties": {"ticker": {"type": "string"}}}), "responses": {"200": resp(CANCELLED), **errs(400, 401, 403, 409, 429)}}},
+    "/v1/positions/{ticker}/close": {"post": {"operationId": "closePosition", "tags": ["account"], "summary": "Close (part of) a position with a reduce-only order: market IOC, or a limit order when price_ticks is given; 400 NO_POSITION when flat", "parameters": [TICKER, IDEMP], "requestBody": body({"type": "object", "properties": {"count": {"type": "integer"}, "price_ticks": {"type": "integer"}}}), "responses": {"200": resp(OBJ), "400": resp({"oneOf": [ref("OrderResponse"), ERR]}, "NO_POSITION, rejected or validation error"), **errs(401, 403, 409)}}},
+    "/v1/account/cancel-after": {
+        "get": {"operationId": "getCancelAfter", "tags": ["account"], "summary": "Dead man's switch state", "responses": {"200": resp({"type": "object", "properties": {"armed": {"type": "boolean"}, "seconds": {"type": "integer"}, "cancel_at": {"type": ["string", "null"], "format": "date-time"}, "armed_at": {"type": ["string", "null"], "format": "date-time"}}}), **errs(401, 403)}},
+        "post": {"operationId": "setCancelAfter", "tags": ["account"], "summary": "Arm (1-3600 s) or disarm (0) the dead man's switch: every working order is cancelled if the deadline passes unrefreshed", "parameters": [IDEMP], "requestBody": body({"type": "object", "required": ["seconds"], "properties": {"seconds": {"type": "integer", "minimum": 0, "maximum": 3600}}}), "responses": {"200": resp(OBJ), **errs(400, 401, 403, 409)}},
+    },
+    "/v1/account/fees": {"get": {"operationId": "getAccountFees", "tags": ["account"], "summary": "Your 30-day maker/taker volume and fees paid", "responses": {"200": resp(OBJ), **errs(401, 403)}}},
+    "/v1/account/incentives": {"get": {"operationId": "getAccountIncentives", "tags": ["account"], "summary": "Daily maker incentives paid to you", "responses": {"200": resp(OBJ), **errs(401, 403)}}},
+    "/v1/account/settlements": {"get": {"operationId": "getAccountSettlements", "tags": ["account"], "summary": "Payouts from settled markets", "parameters": [{"name": "ticker", "in": "query", "schema": {"type": "string"}}, LIMIT(50, 200)], "responses": {"200": resp(OBJ), **errs(401, 403)}}},
+    "/v1/account/activity": {"get": {"operationId": "getAccountActivity", "tags": ["account"], "summary": "Newest-first feed of fills, order updates, settlements and cash movements", "parameters": [{"name": "types", "in": "query", "schema": {"type": "string"}, "description": "Comma list of fill, order, settlement, cash (default all)."}, *FROM_TO, {"name": "ticker", "in": "query", "schema": {"type": "string"}}, LIMIT(50, 200)], "responses": {"200": resp(OBJ), **errs(400, 401, 403)}}},
+    "/v1/account/api-keys/{key_id}/limits": {"patch": {"operationId": "patchApiKeyLimits", "tags": ["auth"], "summary": "Replace a key's trading caps (null removes them)", "parameters": [KEY_ID], "requestBody": body({"type": "object", "required": ["limits"], "properties": {"limits": {"oneOf": [LIMITS, {"type": "null"}]}}}), "responses": {"200": resp(OBJ), **errs(400, 401, 403, 404)}}},
+})
+schemas["KeyLimits"] = LIMITS
+schemas["ApiKeyCreateRequest"]["properties"]["limits"] = {"$ref": "#/components/schemas/KeyLimits"}
+
 spec = {
     "openapi": "3.1.0",
     "info": {
         "title": "SarvaEX Public API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "description": (
             "Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout; "
             "futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. "
@@ -272,7 +330,7 @@ spec = {
         "contact": {"name": "SarvaEX", "url": "https://sarvaex.com"},
     },
     "servers": [{"url": "https://api.sarvaex.com", "description": "Production"}, {"url": "http://localhost:18080", "description": "Local docker-compose"}],
-    "tags": [{"name": "markets"}, {"name": "orders"}, {"name": "account"}, {"name": "auth"}, {"name": "rfq"}, {"name": "health"}],
+    "tags": [{"name": "markets"}, {"name": "orders"}, {"name": "account"}, {"name": "auth"}, {"name": "rfq"}, {"name": "exchange"}, {"name": "health"}],
     "security": AUTH,
     "paths": paths,
     "components": {

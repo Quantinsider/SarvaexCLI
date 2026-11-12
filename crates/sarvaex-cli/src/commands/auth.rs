@@ -298,6 +298,7 @@ async fn keys(ctx: &Ctx, cmd: KeysCmd) -> Result<i32> {
             name,
             scopes,
             expires_at,
+            limits,
         } => {
             let scopes: Vec<String> =
                 scopes.unwrap_or_else(|| ALL_SCOPES.iter().map(|s| s.to_string()).collect());
@@ -310,18 +311,52 @@ async fn keys(ctx: &Ctx, cmd: KeysCmd) -> Result<i32> {
                 }
             }
             let refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-            let created = ctx
-                .client()
-                .create_api_key(&name, &refs, expires_at.as_deref())
-                .await?;
+            let limits = super::expansion::limits_value(&limits)?;
+            let created = match &limits {
+                Some(l) => {
+                    ctx.client()
+                        .create_api_key_with_limits(&name, &refs, expires_at.as_deref(), l)
+                        .await?
+                }
+                None => {
+                    ctx.client()
+                        .create_api_key(&name, &refs, expires_at.as_deref())
+                        .await?
+                }
+            };
             ctx.out.emit(&created, || {
                 format!(
-                    "Created key {} ({}). Secret (shown once):\n{}\nScopes: {}",
+                    "Created key {} ({}). Secret (shown once):\n{}\nScopes: {}{}",
                     created.key_prefix,
                     created.name,
                     created.key,
-                    created.scopes.join(", ")
+                    created.scopes.join(", "),
+                    limits
+                        .as_ref()
+                        .map(|l| format!("\nLimits: {l}"))
+                        .unwrap_or_default()
                 )
+            });
+            Ok(exit::OK)
+        }
+        KeysCmd::Limits {
+            key_id,
+            limits,
+            clear,
+        } => {
+            let value = super::expansion::limits_value(&limits)?;
+            if value.is_none() && !clear {
+                return Err(anyhow!(
+                    "give at least one limit flag, or --clear to remove every limit"
+                ));
+            }
+            let v = ctx
+                .client()
+                .set_api_key_limits(&key_id, value.as_ref())
+                .await?;
+            ctx.out.emit(&v, || match &value {
+                Some(l) => format!("Limits on {key_id} are now {l}"),
+                None => format!("Removed every limit from {key_id}."),
             });
             Ok(exit::OK)
         }

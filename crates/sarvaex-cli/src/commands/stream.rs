@@ -22,11 +22,33 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> Result<i32> {
     let mut conn = WsConnection::connect(ctx.client().ws_url(), ctx.client().credential())
         .await
         .context("websocket connect")?;
+    // With --ticker-stats or --candles the tickers feed those channels instead of the
+    // raw market stream (add --book or --private to get the market stream as well).
+    let only_channels =
+        (args.ticker_stats || args.candles.is_some()) && !args.private && !args.book;
     for t in &tickers {
-        conn.subscribe_market(t).await?;
+        if !only_channels {
+            conn.subscribe_market(t).await?;
+        }
         if args.private {
             conn.subscribe_private(t).await?;
         }
+        if args.ticker_stats {
+            conn.subscribe_channel("ticker", Some(t), None).await?;
+        }
+        if let Some(interval) = &args.candles {
+            conn.subscribe_channel("candles", Some(t), Some(interval))
+                .await?;
+        }
+    }
+    if args.orders {
+        conn.subscribe_channel("orders", None, None).await?;
+    }
+    if args.lifecycle {
+        conn.subscribe_channel("lifecycle", None, None).await?;
+    }
+    if args.exchange {
+        conn.subscribe_channel("exchange", None, None).await?;
     }
     let mut books: HashMap<String, LocalBook> = tickers
         .iter()

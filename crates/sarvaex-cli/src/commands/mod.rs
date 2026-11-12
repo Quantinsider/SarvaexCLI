@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 pub mod account;
 pub mod auth;
+pub mod expansion;
 pub mod markets;
 pub mod mcp;
 pub mod misc;
@@ -109,6 +110,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
         Command::Rfq(cmd) => rfq::run(&ctx, cmd).await,
         Command::MarketRequests(cmd) => misc::market_requests(&ctx, cmd).await,
         Command::Stream(args) => stream::run(&ctx, args).await,
+        Command::Exchange(cmd) => expansion::exchange(&ctx, cmd).await,
         Command::Health => misc::health(&ctx).await,
         Command::Api(args) => misc::api(&ctx, args).await,
         Command::Mcp(cmd) => mcp::run(&ctx, cmd).await,
