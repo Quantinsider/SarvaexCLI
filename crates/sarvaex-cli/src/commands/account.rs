@@ -200,6 +200,9 @@ pub async fn account(ctx: &Ctx, cmd: AccountCmd) -> Result<i32> {
         }
         AccountCmd::Incentives => return super::expansion::incentives(ctx).await,
         AccountCmd::CancelAfter(cmd) => return super::expansion::cancel_after(ctx, cmd).await,
+        AccountCmd::Limits(args) => return super::expansion::account_limits(ctx, args).await,
+        AccountCmd::Portfolio => return super::expansion::portfolio(ctx).await,
+        AccountCmd::Notifications(cmd) => return super::expansion::notifications(ctx, cmd).await,
     }
     Ok(exit::OK)
 }

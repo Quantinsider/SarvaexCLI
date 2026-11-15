@@ -50,6 +50,9 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> Result<i32> {
     if args.exchange {
         conn.subscribe_channel("exchange", None, None).await?;
     }
+    if args.notifications {
+        conn.subscribe_channel("notifications", None, None).await?;
+    }
     let mut books: HashMap<String, LocalBook> = tickers
         .iter()
         .map(|t| (t.clone(), LocalBook::new(t.clone())))

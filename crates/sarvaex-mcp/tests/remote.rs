@@ -593,3 +593,79 @@ async fn trigger_orders_work_through_the_place_order_tool() {
         assert_eq!(v["result"]["isError"], true, "{v}");
     }
 }
+
+#[tokio::test]
+async fn phase_d_tools_work_with_a_direct_api_key() {
+    let h = Harness::start().await;
+    let key = API_KEY_TRADER;
+    let (status, v) = h.mcp(key, init_msg()).await;
+    assert_eq!(status, 200, "{v}");
+
+    let (_, v) = h.call_tool(key, "get_account_limits", json!({})).await;
+    let start = tool_text(&v)["max_order_size_micro_usdc"].as_i64().unwrap();
+
+    // An agent can make its account stricter...
+    let (_, v) = h
+        .call_tool(
+            key,
+            "lower_account_limits",
+            json!({"max_order_size_usdc": 2500.0, "position_limits": {"SX-FEDDEC-26OCT-H25": 4}}),
+        )
+        .await;
+    let lowered = tool_text(&v);
+    assert_eq!(
+        lowered["limits"]["max_order_size_micro_usdc"],
+        2_500_000_000_i64
+    );
+    assert_eq!(
+        lowered["limits"]["per_contract_position_limit"]["SX-FEDDEC-26OCT-H25"],
+        4
+    );
+    assert!(
+        lowered["limits"]["max_order_size_micro_usdc"]
+            .as_i64()
+            .unwrap()
+            < start
+    );
+
+    // ...but never looser: that is a tool error and nothing changes.
+    let (_, v) = h
+        .call_tool(
+            key,
+            "lower_account_limits",
+            json!({"max_order_size_usdc": 9000.0}),
+        )
+        .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("LIMIT_CANNOT_BE_RAISED"),
+        "{v}"
+    );
+    let (_, v) = h.call_tool(key, "lower_account_limits", json!({})).await;
+    assert_eq!(
+        v["result"]["isError"], true,
+        "asking to lower nothing is an error"
+    );
+
+    // The change left a notification the agent can read and clear.
+    let (_, v) = h
+        .call_tool(key, "get_notifications", json!({"unread_only": true}))
+        .await;
+    let n = tool_text(&v);
+    assert_eq!(n["notifications"][0]["kind"], "LIMITS_TIGHTENED", "{n}");
+    let id = n["notifications"][0]["notification_id"].as_i64().unwrap();
+    let (_, v) = h
+        .call_tool(key, "mark_notifications_read", json!({"ids": [id]}))
+        .await;
+    assert_eq!(tool_text(&v)["unread_count"], 0);
+
+    let (_, v) = h.call_tool(key, "get_portfolio", json!({})).await;
+    assert!(tool_text(&v)["account"]["equity_micro_usdc"].is_number());
+    let (_, v) = h
+        .call_tool(key, "list_my_rfqs", json!({"status": "OPEN"}))
+        .await;
+    assert_eq!(tool_text(&v)["rfqs"].as_array().unwrap().len(), 1);
+}

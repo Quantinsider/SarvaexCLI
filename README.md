@@ -79,8 +79,13 @@ sarvaex positions close SX-…                          # reduce-only; --price f
 sarvaex account activity --types fill,order           # fills, orders, settlements and cash in one feed
 sarvaex account fees | incentives | settlements
 sarvaex account cancel-after set 60                   # dead man's switch: cancel everything unless refreshed
+sarvaex account portfolio                             # balance, equity, positions, margin and what is working
+sarvaex account limits --max-order-size 500           # lower your own limits (they can only go down)
+sarvaex account notifications list --unread           # a stop fired, the switch fired, a key changed...
+sarvaex rfq list --role any                           # your own RFQs
 sarvaex markets stats | candles | trades | books      # market data beyond the book
 sarvaex stream --orders --exchange --lifecycle        # live order updates, exchange mode, market open/close
+sarvaex stream --notifications                        # account notifications as they happen
 ```
 
 A batch file is a JSON array; prices are in display units like everywhere else:
@@ -186,7 +191,9 @@ Header-capable MCP clients can skip OAuth: `Authorization: Bearer svx_live_…`.
 `get_ledger_history`, `list_orders`, `get_order`, `place_order` (with `dry_run`), `cancel_order`,
 `cancel_all_orders`, `preview_margin`, `credit_demo_funds`, `get_trading_rules`, plus
 `get_exchange_status`, `get_fee_schedule`, `get_market_stats`, `get_candles`,
-`get_account_activity`, `amend_order`, `cancel_orders`, `close_position`, `set_cancel_after`.
+`get_account_activity`, `amend_order`, `cancel_orders`, `close_position`, `set_cancel_after`, plus
+`get_portfolio`, `get_account_limits`, `lower_account_limits`, `get_notifications`,
+`mark_notifications_read`, `list_my_rfqs`.
 
 ## Developing
 

@@ -30,6 +30,13 @@ fn rfq_kv(r: &Rfq) -> String {
 
 pub async fn run(ctx: &Ctx, cmd: RfqCmd) -> Result<i32> {
     match cmd {
+        RfqCmd::List {
+            role,
+            status,
+            ticker,
+            limit,
+            cursor,
+        } => return super::expansion::rfq_list(ctx, role, status, ticker, limit, cursor).await,
         RfqCmd::Create {
             ticker,
             side,

@@ -544,3 +544,183 @@ async fn read_only_guard_blocks_the_new_mutations() {
     // Reads are unaffected.
     assert!(c.cancel_after_status().await.is_ok());
 }
+
+#[tokio::test]
+async fn phase_d_methods_follow_the_documented_shapes() {
+    let gw = MockGateway::new();
+    let base = gw.spawn().await;
+    let c = client(&base, API_KEY_TRADER, Guards::default()).await;
+
+    // Limits can only be lowered; raising is refused and changes nothing.
+    let none = std::collections::BTreeMap::new();
+    let limits = c.account_limits().await.unwrap();
+    let start = limits["max_order_size_micro_usdc"].as_i64().unwrap();
+    let lowered = c
+        .lower_account_limits(Some(start / 2), None, &none, None)
+        .await
+        .unwrap();
+    assert_eq!(lowered["limits"]["max_order_size_micro_usdc"], start / 2);
+    assert_eq!(lowered["changed"][0]["field"], "max_order_size_micro_usdc");
+    let err = c
+        .lower_account_limits(Some(start), None, &none, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "LIMIT_CANNOT_BE_RAISED");
+    assert_eq!(
+        c.account_limits().await.unwrap()["max_order_size_micro_usdc"],
+        start / 2,
+        "a refused raise changed nothing"
+    );
+    assert!(
+        c.lower_account_limits(None, None, &none, None)
+            .await
+            .is_err(),
+        "nothing to lower is refused locally"
+    );
+    let mut per = std::collections::BTreeMap::new();
+    per.insert("SX-FEDDEC-26OCT-H25".to_owned(), 7);
+    let v = c
+        .lower_account_limits(None, None, &per, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        v["limits"]["per_contract_position_limit"]["SX-FEDDEC-26OCT-H25"],
+        7
+    );
+
+    // The two changes above each left a notification; read state works.
+    let n = c.notifications(false, None, None).await.unwrap();
+    assert_eq!(n["unread_count"], 2);
+    assert_eq!(n["notifications"][0]["kind"], "LIMITS_TIGHTENED");
+    let first = n["notifications"][0]["notification_id"].as_i64().unwrap();
+    let marked = c.mark_notifications_read(&[first], false).await.unwrap();
+    assert_eq!(
+        (marked["marked"].as_i64(), marked["unread_count"].as_i64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        c.notifications(true, Some(10), None).await.unwrap()["count"],
+        1
+    );
+    assert!(
+        c.mark_notifications_read(&[], false).await.is_err(),
+        "neither ids nor all"
+    );
+    assert!(
+        c.mark_notifications_read(&[1], true).await.is_err(),
+        "both ids and all"
+    );
+    assert_eq!(
+        c.mark_notifications_read(&[], true).await.unwrap()["unread_count"],
+        0
+    );
+
+    // Portfolio and RFQ listing.
+    let p = c.portfolio().await.unwrap();
+    assert!(
+        p["account"]["equity_micro_usdc"].is_number()
+            && p["working"]["pending_triggers"].is_number()
+    );
+    assert_eq!(
+        c.list_rfqs(None, None, None, None, None).await.unwrap()["rfqs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        c.list_rfqs(None, Some("open"), None, None, None)
+            .await
+            .unwrap()["rfqs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        c.list_rfqs(Some("nobody"), None, None, None, None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_headers_are_remembered_and_a_429_waits_for_the_reset() {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::routing::get;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Refuses the first call with 429 and no Retry-After, then answers; both carry the headers.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let app = axum::Router::new().route(
+        "/v1/account/balance",
+        get(move || {
+            let seen = seen.clone();
+            async move {
+                let first = seen.fetch_add(1, Ordering::SeqCst) == 0;
+                let mut h = HeaderMap::new();
+                h.insert("x-ratelimit-limit", HeaderValue::from_static("1200"));
+                h.insert("x-ratelimit-remaining", HeaderValue::from_static(if first { "0" } else { "1198" }));
+                h.insert("x-ratelimit-reset", HeaderValue::from_static("1"));
+                h.insert("x-ratelimit-bucket", HeaderValue::from_static("read"));
+                if first {
+                    (StatusCode::TOO_MANY_REQUESTS, h, axum::Json(serde_json::json!({"error": {"code": "RATE_LIMITED", "message": "slow down"}})))
+                } else {
+                    (StatusCode::OK, h, axum::Json(serde_json::json!({"user_id": "u", "cash_micro_usdc": 1, "held_micro_usdc": 0, "total_micro_usdc": 1})))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let c = client(&base, API_KEY_TRADER, Guards::default()).await;
+    assert!(
+        c.rate_limit("read").is_none(),
+        "nothing seen before the first response"
+    );
+    let started = std::time::Instant::now();
+    let balance = c.balance().await.unwrap();
+    assert_eq!(balance.cash_micro_usdc, 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "retried once after the 429");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "waited for the reset the headers announced"
+    );
+    let seen = c.rate_limit("read").unwrap();
+    assert_eq!(
+        (seen.limit, seen.remaining, seen.reset_secs),
+        (1200, 1198, 1)
+    );
+    assert!(c.rate_limit("write").is_none());
+    // A different credential has its own budget.
+    assert!(
+        c.with_swapped_credential(Credential::ApiKey("svx_live_other".into()))
+            .rate_limit("read")
+            .is_none()
+    );
+}
+
+#[test]
+fn rate_limit_parsing_needs_all_three_numbers() {
+    use sarvaex_sdk::RateLimit;
+    let mut h = reqwest::header::HeaderMap::new();
+    assert!(RateLimit::from_headers(&h).is_none());
+    h.insert("x-ratelimit-limit", "240".parse().unwrap());
+    h.insert("x-ratelimit-remaining", "10".parse().unwrap());
+    assert!(RateLimit::from_headers(&h).is_none(), "reset is missing");
+    h.insert("x-ratelimit-reset", "33".parse().unwrap());
+    let r = RateLimit::from_headers(&h).unwrap();
+    assert_eq!(
+        (r.limit, r.remaining, r.reset_secs, r.bucket.as_str()),
+        (240, 10, 33, "")
+    );
+    h.insert("x-ratelimit-bucket", "write".parse().unwrap());
+    assert_eq!(RateLimit::from_headers(&h).unwrap().bucket, "write");
+    h.insert("x-ratelimit-remaining", "lots".parse().unwrap());
+    assert!(
+        RateLimit::from_headers(&h).is_none(),
+        "garbage is ignored, not guessed"
+    );
+}

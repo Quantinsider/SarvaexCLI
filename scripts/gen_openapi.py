@@ -316,6 +316,56 @@ paths.update({
     "/v1/account/api-keys/{key_id}/limits": {"patch": {"operationId": "patchApiKeyLimits", "tags": ["auth"], "summary": "Replace a key's trading caps (null removes them)", "parameters": [KEY_ID], "requestBody": body({"type": "object", "required": ["limits"], "properties": {"limits": {"oneOf": [LIMITS, {"type": "null"}]}}}), "responses": {"200": resp(OBJ), **errs(400, 401, 403, 404)}}},
 })
 schemas["KeyLimits"] = LIMITS
+
+# ---------------------------------------------------------------------------
+# Phase D: account limits (tighten only), portfolio, notifications, RFQ listing, rate-limit headers
+# ---------------------------------------------------------------------------
+ACCOUNT_LIMITS = {
+    "type": "object",
+    "description": "Limits the exchange enforces on the account. They can only be lowered through the API.",
+    "properties": {
+        "kyc_tier": {"type": "integer"},
+        "max_order_size_micro_usdc": {"type": "integer"},
+        "daily_loss_limit_micro_usdc": {"type": "integer"},
+        "per_contract_position_limit": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "ticker to contracts; a contract without an entry uses its own limit"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "raise_policy": {"type": "string"},
+    },
+}
+LOWER_LIMITS = {
+    "type": "object",
+    "description": "Any of the three. A value above the current one is refused with LIMIT_CANNOT_BE_RAISED and nothing changes.",
+    "properties": {
+        "max_order_size_micro_usdc": {"type": "integer", "minimum": 1},
+        "daily_loss_limit_micro_usdc": {"type": "integer", "minimum": 1},
+        "per_contract_position_limit": {"type": "object", "maxProperties": 50, "additionalProperties": {"type": "integer", "minimum": 1}},
+    },
+}
+NOTIFICATION = {
+    "type": "object",
+    "properties": {
+        "notification_id": {"type": "integer"},
+        "kind": {"type": "string", "enum": ["TRIGGER_FIRED", "TRIGGER_REJECTED", "TRIGGER_EXPIRED", "TRIGGER_CANCELLED", "CANCEL_AFTER_FIRED", "LIMITS_TIGHTENED", "API_KEY_CREATED", "API_KEY_REVOKED"]},
+        "title": {"type": "string"},
+        "message": {"type": "string"},
+        "data": OBJ,
+        "created_at": {"type": "string", "format": "date-time"},
+        "read_at": {"type": ["string", "null"], "format": "date-time"},
+    },
+}
+paths.update({
+    "/v1/account/limits": {
+        "get": {"operationId": "getAccountLimits", "tags": ["account"], "summary": "Limits enforced on your account", "responses": {"200": resp(ACCOUNT_LIMITS), **errs(401, 403, 404)}},
+        "put": {"operationId": "lowerAccountLimits", "tags": ["account"], "summary": "Lower account limits (limits can only go down; scope trading:write)", "parameters": [IDEMP], "requestBody": body(LOWER_LIMITS), "responses": {"200": resp({"type": "object", "properties": {"limits": ACCOUNT_LIMITS, "changed": {"type": "array", "items": {"type": "object", "properties": {"field": {"type": "string"}, "from": {"type": "integer"}, "to": {"type": "integer"}}}}}}), "400": resp(ERR, "INVALID_ARGUMENT, or LIMIT_CANNOT_BE_RAISED with field, current and requested"), **errs(401, 403, 404, 409)}},
+    },
+    "/v1/account/portfolio": {"get": {"operationId": "getPortfolio", "tags": ["account"], "summary": "Balance, equity and P&L, positions, cross margin and working counts in one call", "responses": {"200": resp({"type": "object", "properties": {"as_of": {"type": "string", "format": "date-time"}, "account": OBJ, "positions": {"type": "array", "items": OBJ}, "margin": {"oneOf": [OBJ, {"type": "null"}]}, "margin_unavailable_reason": {"type": ["string", "null"]}, "working": {"type": "object", "properties": {"open_orders": {"type": "integer"}, "pending_triggers": {"type": "integer"}}}}}), **errs(401, 403)}}},
+    "/v1/account/notifications": {"get": {"operationId": "listNotifications", "tags": ["account"], "summary": "Account notifications, newest first", "parameters": [{"name": "unread", "in": "query", "schema": {"type": "boolean"}}, LIMIT(50, 200), {"name": "before", "in": "query", "schema": {"type": "integer"}, "description": "Only notifications with an id below this; use the previous next_before."}], "responses": {"200": resp({"type": "object", "properties": {"count": {"type": "integer"}, "unread_count": {"type": "integer"}, "notifications": {"type": "array", "items": NOTIFICATION}, "next_before": {"type": ["integer", "null"]}}}), **errs(401, 403)}}},
+    "/v1/account/notifications/read": {"post": {"operationId": "markNotificationsRead", "tags": ["account"], "summary": "Mark notifications read, by id or all (needs no Idempotency-Key)", "requestBody": body({"type": "object", "properties": {"ids": {"type": "array", "maxItems": 200, "items": {"type": "integer"}}, "all": {"type": "boolean"}}, "description": "Give either ids or all."}), "responses": {"200": resp({"type": "object", "properties": {"marked": {"type": "integer"}, "unread_count": {"type": "integer"}}}), **errs(400, 401, 403)}}},
+})
+paths["/v1/rfqs"]["get"] = {"operationId": "listRfqs", "tags": ["rfq"], "summary": "Your own RFQs (created, quoted, or both); there is no public list", "parameters": [{"name": "role", "in": "query", "schema": {"type": "string", "enum": ["creator", "maker", "any"], "default": "creator"}}, {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["OPEN", "ACCEPTED_PENDING_EXECUTION", "EXECUTED", "CANCELLED", "EXPIRED", "REJECTED"]}}, {"name": "ticker", "in": "query", "schema": {"type": "string"}}, LIMIT(50, 200), CURSOR], "responses": {"200": resp({"type": "object", "properties": {"rfqs": {"type": "array", "items": ref("Rfq")}, "next_cursor": {"type": "string"}}}), **errs(400, 401)}}
+schemas["AccountLimits"] = ACCOUNT_LIMITS
+schemas["Notification"] = NOTIFICATION
+# Every response to a limited caller carries the rate-limit headers; say so once in the description.
 schemas["Order"]["properties"].update({
     "order_type": {"type": "string", "description": "Trigger orders only."},
     "trigger_price_ticks": {"type": "integer", "description": "Trigger orders only: the price that arms the order."},
@@ -329,11 +379,11 @@ spec = {
     "openapi": "3.1.0",
     "info": {
         "title": "SarvaEX Public API",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "description": (
             "Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout; "
             "futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. "
-            "Every POST that changes state requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential."
+            "Every POST that changes state requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential; every response carries X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset (seconds) and X-RateLimit-Bucket (read or write)."
         ),
         "contact": {"name": "SarvaEX", "url": "https://sarvaex.com"},
     },

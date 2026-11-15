@@ -1,10 +1,11 @@
 openapi: 3.1.0
 info:
   title: SarvaEX Public API
-  version: 1.1.0
+  version: 1.2.0
   description: 'Prediction-market exchange API. All prices are integer `price_ticks` (binary contracts: cents of a $1 payout;
     futures: see `settlement_rule.encoding`), sizes are whole contracts, money is micro-USDC. Every POST that changes state
-    requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential.'
+    requires an `Idempotency-Key` header. Rate limits: 1200 reads / 240 writes per minute per credential; every response carries
+    X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset (seconds) and X-RateLimit-Bucket (read or write).'
   contact:
     name: SarvaEX
     url: https://sarvaex.com
@@ -1131,6 +1132,68 @@ paths:
           content:
             application/json:
               schema: *id002
+    get:
+      operationId: listRfqs
+      tags:
+      - rfq
+      summary: Your own RFQs (created, quoted, or both); there is no public list
+      parameters:
+      - name: role
+        in: query
+        schema:
+          type: string
+          enum:
+          - creator
+          - maker
+          - any
+          default: creator
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - OPEN
+          - ACCEPTED_PENDING_EXECUTION
+          - EXECUTED
+          - CANCELLED
+          - EXPIRED
+          - REJECTED
+      - name: ticker
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - *id004
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rfqs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Rfq'
+                  next_cursor:
+                    type: string
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
   /v1/rfqs/{rfq_id}:
     get:
       operationId: getRfq
@@ -2224,7 +2287,7 @@ paths:
               properties:
                 limits:
                   oneOf:
-                  - &id011
+                  - &id012
                     type: object
                     description: Trading caps enforced by the gateway and the order router. A key with limits can only create
                       keys at least as restricted.
@@ -2273,6 +2336,299 @@ paths:
               schema: *id002
         '404':
           description: Not found
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/limits:
+    get:
+      operationId: getAccountLimits
+      tags:
+      - account
+      summary: Limits enforced on your account
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: &id011
+                type: object
+                description: Limits the exchange enforces on the account. They can only be lowered through the API.
+                properties:
+                  kyc_tier:
+                    type: integer
+                  max_order_size_micro_usdc:
+                    type: integer
+                  daily_loss_limit_micro_usdc:
+                    type: integer
+                  per_contract_position_limit:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                    description: ticker to contracts; a contract without an entry uses its own limit
+                  updated_at:
+                    type: string
+                    format: date-time
+                  raise_policy:
+                    type: string
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+    put:
+      operationId: lowerAccountLimits
+      tags:
+      - account
+      summary: Lower account limits (limits can only go down; scope trading:write)
+      parameters:
+      - *id005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Any of the three. A value above the current one is refused with LIMIT_CANNOT_BE_RAISED and nothing
+                changes.
+              properties:
+                max_order_size_micro_usdc:
+                  type: integer
+                  minimum: 1
+                daily_loss_limit_micro_usdc:
+                  type: integer
+                  minimum: 1
+                per_contract_position_limit:
+                  type: object
+                  maxProperties: 50
+                  additionalProperties:
+                    type: integer
+                    minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  limits: *id011
+                  changed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        from:
+                          type: integer
+                        to:
+                          type: integer
+        '400':
+          description: INVALID_ARGUMENT, or LIMIT_CANNOT_BE_RAISED with field, current and requested
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: *id002
+        '409':
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/portfolio:
+    get:
+      operationId: getPortfolio
+      tags:
+      - account
+      summary: Balance, equity and P&L, positions, cross margin and working counts in one call
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date-time
+                  account: *id006
+                  positions:
+                    type: array
+                    items: *id006
+                  margin:
+                    oneOf:
+                    - *id006
+                    - type: 'null'
+                  margin_unavailable_reason:
+                    type:
+                    - string
+                    - 'null'
+                  working:
+                    type: object
+                    properties:
+                      open_orders:
+                        type: integer
+                      pending_triggers:
+                        type: integer
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/notifications:
+    get:
+      operationId: listNotifications
+      tags:
+      - account
+      summary: Account notifications, newest first
+      parameters:
+      - name: unread
+        in: query
+        schema:
+          type: boolean
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: before
+        in: query
+        schema:
+          type: integer
+        description: Only notifications with an id below this; use the previous next_before.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  unread_count:
+                    type: integer
+                  notifications:
+                    type: array
+                    items: &id013
+                      type: object
+                      properties:
+                        notification_id:
+                          type: integer
+                        kind:
+                          type: string
+                          enum:
+                          - TRIGGER_FIRED
+                          - TRIGGER_REJECTED
+                          - TRIGGER_EXPIRED
+                          - TRIGGER_CANCELLED
+                          - CANCEL_AFTER_FIRED
+                          - LIMITS_TIGHTENED
+                          - API_KEY_CREATED
+                          - API_KEY_REVOKED
+                        title:
+                          type: string
+                        message:
+                          type: string
+                        data: *id006
+                        created_at:
+                          type: string
+                          format: date-time
+                        read_at:
+                          type:
+                          - string
+                          - 'null'
+                          format: date-time
+                  next_before:
+                    type:
+                    - integer
+                    - 'null'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
+          content:
+            application/json:
+              schema: *id002
+  /v1/account/notifications/read:
+    post:
+      operationId: markNotificationsRead
+      tags:
+      - account
+      summary: Mark notifications read, by id or all (needs no Idempotency-Key)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: integer
+                all:
+                  type: boolean
+              description: Give either ids or all.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  marked:
+                    type: integer
+                  unread_count:
+                    type: integer
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: *id002
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: *id002
+        '403':
+          description: Missing scope
           content:
             application/json:
               schema: *id002
@@ -3147,4 +3503,6 @@ components:
           - Geopolitics / Shipping
         source:
           type: string
-    KeyLimits: *id011
+    KeyLimits: *id012
+    AccountLimits: *id011
+    Notification: *id013

@@ -157,6 +157,36 @@ pub fn derive_ws_url(base: &Url) -> Result<Url> {
 pub struct Client {
     http: reqwest::Client,
     cfg: Arc<ClientConfig>,
+    /// What the gateway last reported for this credential, per bucket (`read` / `write`).
+    rate: Arc<std::sync::Mutex<std::collections::HashMap<String, RateLimit>>>,
+}
+
+/// The gateway's `X-RateLimit-*` headers from a response: how much of a per-minute budget is left.
+/// Reads and writes have separate budgets; `bucket` says which one the response describes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RateLimit {
+    pub bucket: String,
+    pub limit: u32,
+    pub remaining: u32,
+    /// Whole seconds until the window resets.
+    pub reset_secs: u64,
+}
+
+impl RateLimit {
+    /// Parses the headers; `None` when the response carries none (an exempt or older gateway).
+    pub fn from_headers(headers: &header::HeaderMap) -> Option<Self> {
+        let num = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+        Some(Self {
+            bucket: headers
+                .get("x-ratelimit-bucket")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned(),
+            limit: num("x-ratelimit-limit")? as u32,
+            remaining: num("x-ratelimit-remaining")? as u32,
+            reset_secs: num("x-ratelimit-reset")?,
+        })
+    }
 }
 
 impl Client {
@@ -169,7 +199,13 @@ impl Client {
         Ok(Self {
             http,
             cfg: Arc::new(cfg),
+            rate: Arc::default(),
         })
+    }
+
+    /// The last rate-limit report for a bucket (`"read"` or `"write"`), if the gateway sent one.
+    pub fn rate_limit(&self, bucket: &str) -> Option<RateLimit> {
+        self.rate.lock().ok()?.get(bucket).cloned()
     }
 
     /// Convenience: production URL with the given credential.
@@ -198,6 +234,8 @@ impl Client {
         Self {
             http: self.http.clone(),
             cfg: Arc::new(cfg),
+            // A different credential has its own budget, so it does not share what we last saw.
+            rate: Arc::default(),
         }
     }
 
@@ -1324,6 +1362,137 @@ impl Client {
         self.get_auth("v1/account/activity", &q).await
     }
 
+    // -----------------------------------------------------------------------
+    // Account limits, portfolio, notifications, RFQ listing
+    // -----------------------------------------------------------------------
+
+    /// The limits risk enforces on this account: max order size, daily loss limit and
+    /// per-contract position limits.
+    pub async fn account_limits(&self) -> Result<Value> {
+        self.get_auth("v1/account/limits", &[]).await
+    }
+
+    /// Lower account limits. Limits can only go down through the API: a value above the
+    /// current one is refused with `LIMIT_CANNOT_BE_RAISED` and nothing changes.
+    pub async fn lower_account_limits(
+        &self,
+        max_order_size_micro_usdc: Option<i64>,
+        daily_loss_limit_micro_usdc: Option<i64>,
+        per_contract_position_limit: &std::collections::BTreeMap<String, i64>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value> {
+        self.require_mutation()?;
+        let mut body = json!({});
+        if let Some(v) = max_order_size_micro_usdc {
+            body["max_order_size_micro_usdc"] = json!(v);
+        }
+        if let Some(v) = daily_loss_limit_micro_usdc {
+            body["daily_loss_limit_micro_usdc"] = json!(v);
+        }
+        if !per_contract_position_limit.is_empty() {
+            body["per_contract_position_limit"] = json!(per_contract_position_limit);
+        }
+        if body.as_object().is_some_and(|o| o.is_empty()) {
+            return Err(SarvaexError::Validation(
+                "give at least one limit to lower".into(),
+            ));
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| idempotency::idempotency_key("limits"));
+        self.send(
+            Method::PUT,
+            "v1/account/limits",
+            &[],
+            Some(&body),
+            Some(&key),
+            true,
+        )
+        .await
+    }
+
+    /// Balance, equity and P&L, open positions, cross margin and working counts in one call.
+    pub async fn portfolio(&self) -> Result<Value> {
+        self.get_auth("v1/account/portfolio", &[]).await
+    }
+
+    /// Things that happened to the account (a trigger fired, the dead man's switch cancelled
+    /// orders, limits changed, an API key created or revoked), newest first.
+    pub async fn notifications(
+        &self,
+        unread_only: bool,
+        limit: Option<u32>,
+        before: Option<i64>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let before = before.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = Vec::new();
+        if unread_only {
+            q.push(("unread", "true"));
+        }
+        if let Some(v) = limit.as_deref() {
+            q.push(("limit", v));
+        }
+        if let Some(v) = before.as_deref() {
+            q.push(("before", v));
+        }
+        self.get_auth("v1/account/notifications", &q).await
+    }
+
+    /// Mark notifications read, by id or all at once. Needs no Idempotency-Key (repeating it is harmless).
+    pub async fn mark_notifications_read(&self, ids: &[i64], all: bool) -> Result<Value> {
+        self.require_mutation()?;
+        if all == !ids.is_empty() {
+            return Err(SarvaexError::Validation(
+                "give either ids or all, not both and not neither".into(),
+            ));
+        }
+        let body = if all {
+            json!({ "all": true })
+        } else {
+            json!({ "ids": ids })
+        };
+        self.send(
+            Method::POST,
+            "v1/account/notifications/read",
+            &[],
+            Some(&body),
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// Your own RFQs: those you created (`creator`, default), those you quoted (`maker`) or both
+    /// (`any`). RFQs are private to their creator and the makers who quoted them.
+    pub async fn list_rfqs(
+        &self,
+        role: Option<&str>,
+        status: Option<&str>,
+        ticker: Option<&str>,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<Value> {
+        let limit = limit.map(|v| v.to_string());
+        let mut q: Vec<(&str, &str)> = Vec::new();
+        if let Some(v) = role {
+            q.push(("role", v));
+        }
+        if let Some(v) = status {
+            q.push(("status", v));
+        }
+        if let Some(v) = ticker {
+            q.push(("ticker", v));
+        }
+        if let Some(v) = limit.as_deref() {
+            q.push(("limit", v));
+        }
+        if let Some(v) = cursor {
+            q.push(("cursor", v));
+        }
+        self.get_auth("v1/rfqs", &q).await
+    }
+
     /// Create an API key with trading caps (`limits` is the gateway's limits object).
     pub async fn create_api_key_with_limits(
         &self,
@@ -1502,11 +1671,23 @@ impl Client {
                 async {
                     let resp = req.send().await?;
                     let status = resp.status();
+                    let limit = RateLimit::from_headers(resp.headers());
                     let retry_after = resp
                         .headers()
                         .get(header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.trim().parse::<u64>().ok());
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                        // A 429 without Retry-After still says when the window resets.
+                        .or_else(|| {
+                            (status == StatusCode::TOO_MANY_REQUESTS)
+                                .then(|| limit.as_ref().map(|l| l.reset_secs))
+                                .flatten()
+                        });
+                    if let Some(limit) = limit
+                        && let Ok(mut seen) = self.rate.lock()
+                    {
+                        seen.insert(limit.bucket.clone(), limit);
+                    }
                     let text = resp.text().await?;
                     Ok((status, retry_after, text))
                 }

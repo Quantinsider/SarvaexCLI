@@ -80,7 +80,21 @@ exchange is a float.
     `fired_order_id` is the real order, so check that order, not the trigger, for the fill. A
     stop only protects you if the market trades through it: in a thin book a market stop can fill
     well away from the trigger price.
-16. **Key limits are enforced by the exchange.** A key created with
+16. **Watch your rate-limit budget.** Every response carries `X-RateLimit-Remaining` and
+    `X-RateLimit-Reset` (seconds) for the bucket it used: reads and writes are separate (1200 and 240 a
+    minute). The SDK remembers the last report (`Client::rate_limit("read" | "write")`) and a 429 waits
+    for the reset on its own. Slow down when `Remaining` gets low instead of being refused.
+17. **Check in after running unattended.** `sarvaex account notifications list --unread` (or
+    `get_notifications`) says what happened while you were away: a stop fired or was rejected, the dead
+    man's switch cancelled your orders, a limit was lowered, a key was created or revoked.
+    `sarvaex account portfolio` (`get_portfolio`) is the one-call picture of balance, equity, positions
+    and what is still working.
+18. **You can always make your own account stricter.** `sarvaex account limits --max-order-size 500
+    --daily-loss-limit 2000 --position-limit SX-A=20` (`lower_account_limits`) lowers the account's
+    limits on the exchange itself. It only goes down: asking for a higher value is refused with
+    `LIMIT_CANNOT_BE_RAISED` and nothing changes. Only the exchange operator can raise a limit, so
+    never promise to "restore" one.
+19. **Key limits are enforced by the exchange.** A key created with
     `--max-order-count`, `--max-order-notional-usdc`, `--max-daily-notional-usdc`,
     `--allow-ticker` or `--read-only` is refused with `KEY_LIMIT_EXCEEDED` (HTTP 403)
     beyond them. That is a boundary, not an error to retry around.
@@ -118,6 +132,10 @@ sarvaex account balance | risk | fills | history
 sarvaex account activity --types fill,order --limit 20    # one feed of fills, orders, settlements, cash
 sarvaex account fees | incentives | settlements
 sarvaex account cancel-after set 60 | status | off        # dead man's switch
+sarvaex account portfolio                                 # balance, equity, positions, margin, what is working
+sarvaex account limits                                    # show; add --max-order-size / --daily-loss-limit / --position-limit to lower
+sarvaex account notifications list --unread | read --all  # what happened while you were away
+sarvaex rfq list --role any --status open                 # your own RFQs (created or quoted)
 sarvaex exchange status | schedule | time | fees          # is trading open? what closes soon?
 sarvaex markets stats SX-A SX-B                           # last price, 24h volume, best bid/ask
 sarvaex markets candles SX-A --interval 1h --limit 24
@@ -128,6 +146,7 @@ sarvaex auth keys limits <key_id> --clear
 sarvaex margin preview SXF-… --side long --action buy --price 4.30 --count 2
 sarvaex stream SX-FEDDEC-26OCT-H25 --private  # NDJSON book deltas, trades, your fills
 sarvaex stream --orders --exchange --lifecycle          # your order updates, exchange mode, market open/close
+sarvaex stream --notifications                          # account notifications as they happen
 sarvaex stream SX-A --ticker-stats --candles 1m         # live statistics and candles
 ```
 
@@ -147,7 +166,8 @@ Exit codes: `0` ok · `1` error · `2` usage · `3` auth · `4` order rejected �
 `preview_margin`, `credit_demo_funds`, `get_trading_rules`, and for the expanded API:
 `get_exchange_status`, `get_fee_schedule`, `get_market_stats`, `get_candles`,
 `get_account_activity`, `amend_order`, `cancel_orders`, `close_position`,
-`set_cancel_after`.
+`set_cancel_after`, and for account safety and awareness: `get_portfolio`, `get_account_limits`,
+`lower_account_limits`, `get_notifications`, `mark_notifications_read`, `list_my_rfqs`.
 
 `place_order` accepts either `price` (human units like `0.51` or `4.30`) or
 `price_ticks`. Always call it with `dry_run: true` first when the user has not

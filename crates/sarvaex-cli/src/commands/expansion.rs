@@ -6,7 +6,7 @@
 //! view picks out the fields that matter. Every command also supports `--json`.
 
 use super::Ctx;
-use crate::cli::{CancelAfterCmd, ExchangeCmd, LimitsArgs};
+use crate::cli::{AccountLimitsArgs, CancelAfterCmd, ExchangeCmd, LimitsArgs, NotificationsCmd};
 use crate::output::{exit, kv, short_ts, table, truncate};
 use anyhow::{Context, Result, anyhow, bail};
 use sarvaex_sdk::price::PriceEncoding;
@@ -769,6 +769,281 @@ pub async fn cancel_after(ctx: &Ctx, cmd: CancelAfterCmd) -> Result<i32> {
     Ok(exit::OK)
 }
 
+// ---------------------------------------------------------------------------
+// Phase D: account limits, portfolio, notifications, RFQ listing
+// ---------------------------------------------------------------------------
+
+fn usdc_text(v: &Value, key: &str) -> String {
+    i(v, key)
+        .map(|micro| format!("{} USDC", sarvaex_sdk::price::micro_to_usdc(micro)))
+        .unwrap_or_default()
+}
+
+/// Turns repeated `TICKER=CONTRACTS` flags into the per-contract limit map.
+pub fn parse_position_limits(items: &[String]) -> Result<std::collections::BTreeMap<String, i64>> {
+    let mut out = std::collections::BTreeMap::new();
+    for item in items {
+        let (ticker, n) = item
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--position-limit expects TICKER=CONTRACTS (got '{item}')"))?;
+        let ticker = ticker.trim().to_ascii_uppercase();
+        let n: i64 = n
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("--position-limit {ticker}: '{n}' is not a whole number"))?;
+        if ticker.is_empty() || n <= 0 {
+            bail!("--position-limit needs a ticker and a positive number of contracts");
+        }
+        out.insert(ticker, n);
+    }
+    Ok(out)
+}
+
+pub async fn account_limits(ctx: &Ctx, args: AccountLimitsArgs) -> Result<i32> {
+    let per_contract = parse_position_limits(&args.position_limit)?;
+    let lowering = args.max_order_size.is_some()
+        || args.daily_loss_limit.is_some()
+        || !per_contract.is_empty();
+    if !lowering {
+        let v = ctx.client().account_limits().await?;
+        ctx.out.emit(&v, || limits_text(&v));
+        return Ok(exit::OK);
+    }
+    for (name, value) in [
+        ("--max-order-size", args.max_order_size),
+        ("--daily-loss-limit", args.daily_loss_limit),
+    ] {
+        if value.is_some_and(|u| u <= 0.0) {
+            bail!("{name} must be positive");
+        }
+    }
+    if !ctx.confirm(
+        "Lower these account limits? They can only be raised again by the exchange operator.",
+    ) {
+        bail!("aborted");
+    }
+    let v = ctx
+        .client()
+        .lower_account_limits(
+            args.max_order_size.map(usdc_to_micro),
+            args.daily_loss_limit.map(usdc_to_micro),
+            &per_contract,
+            args.idempotency_key.as_deref(),
+        )
+        .await?;
+    ctx.out.emit(&v, || {
+        let changed = v["changed"].as_array().cloned().unwrap_or_default();
+        let mut out = if changed.is_empty() {
+            "nothing changed: those limits were already at or below the values you gave".to_owned()
+        } else {
+            let mut lines = vec![format!("lowered {} limit(s):", changed.len())];
+            for c in &changed {
+                let usdc = |k: &str| sarvaex_sdk::price::micro_to_usdc(c[k].as_i64().unwrap_or(0));
+                lines.push(if s(c, "field").starts_with("per_contract") {
+                    format!(
+                        "  {}: {} -> {} contracts",
+                        s(c, "field"),
+                        s(c, "from"),
+                        s(c, "to")
+                    )
+                } else {
+                    format!(
+                        "  {}: {} -> {} USDC",
+                        s(c, "field"),
+                        usdc("from"),
+                        usdc("to")
+                    )
+                });
+            }
+            lines.join("\n")
+        };
+        out.push_str(&format!("\n\n{}", limits_text(&v["limits"])));
+        out
+    });
+    Ok(exit::OK)
+}
+
+fn limits_text(v: &Value) -> String {
+    let mut rows = vec![
+        ("max order size", usdc_text(v, "max_order_size_micro_usdc")),
+        (
+            "daily loss limit",
+            usdc_text(v, "daily_loss_limit_micro_usdc"),
+        ),
+        ("kyc tier", s(v, "kyc_tier")),
+    ];
+    let per = v["per_contract_position_limit"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if per.is_empty() {
+        rows.push((
+            "position limits",
+            "the contract's own limit applies everywhere".to_owned(),
+        ));
+    } else {
+        for (ticker, n) in &per {
+            rows.push(("position limit", format!("{ticker}: {n} contracts")));
+        }
+    }
+    format!(
+        "{}\n\nLimits can only be lowered here; the exchange operator raises them.",
+        kv(&rows)
+    )
+}
+
+pub async fn portfolio(ctx: &Ctx) -> Result<i32> {
+    let v = ctx.client().portfolio().await?;
+    ctx.out.emit(&v, || {
+        let a = &v["account"];
+        let mut out = kv(&[
+            ("as of", s(&v, "as_of")),
+            ("cash", usdc_text(a, "cash_micro_usdc")),
+            ("held", usdc_text(a, "held_micro_usdc")),
+            ("equity", usdc_text(a, "equity_micro_usdc")),
+            ("realized P&L", usdc_text(a, "realized_pnl_micro_usdc")),
+            ("unrealized P&L", usdc_text(a, "unrealized_pnl_micro_usdc")),
+            ("open orders", s(&v["working"], "open_orders")),
+            ("pending triggers", s(&v["working"], "pending_triggers")),
+        ]);
+        let positions = v["positions"].as_array().cloned().unwrap_or_default();
+        if positions.is_empty() {
+            out.push_str("\n\nno open positions");
+        } else {
+            let mut t = table(&[
+                "ticker",
+                "net qty",
+                "avg cost",
+                "realized P&L",
+                "unrealized P&L",
+            ]);
+            for p in &positions {
+                t.add_row(vec![
+                    truncate(&s(p, "ticker"), 34),
+                    s(p, "net_qty"),
+                    usdc_text(p, "avg_cost_micro_usdc"),
+                    usdc_text(p, "realized_pnl_micro_usdc"),
+                    usdc_text(p, "unrealized_pnl_micro_usdc"),
+                ]);
+            }
+            out.push_str(&format!("\n\n{t}"));
+        }
+        let margin = &v["margin"];
+        if margin.is_object() {
+            out.push_str(&format!(
+                "\n\ncross margin: {} locked ({} saved against standalone)",
+                usdc_text(margin, "total_margin_micro_usdc"),
+                usdc_text(margin, "savings_micro_usdc")
+            ));
+        } else if let Some(why) = v["margin_unavailable_reason"]
+            .as_str()
+            .filter(|w| !w.is_empty())
+        {
+            out.push_str(&format!("\n\ncross margin unavailable: {why}"));
+        }
+        out
+    });
+    Ok(exit::OK)
+}
+
+pub async fn notifications(ctx: &Ctx, cmd: NotificationsCmd) -> Result<i32> {
+    match cmd {
+        NotificationsCmd::List {
+            unread,
+            limit,
+            before,
+        } => {
+            let v = ctx
+                .client()
+                .notifications(unread, Some(limit.clamp(1, 200)), before)
+                .await?;
+            ctx.out.emit(&v, || {
+                let rows = v["notifications"].as_array().cloned().unwrap_or_default();
+                let header = format!("{} unread", s(&v, "unread_count"));
+                if rows.is_empty() {
+                    return format!("{header}\n\nno notifications");
+                }
+                let mut t = table(&["id", "time", "kind", "message", ""]);
+                for n in &rows {
+                    t.add_row(vec![
+                        s(n, "notification_id"),
+                        short_ts(&n["created_at"].as_str().map(str::to_owned)),
+                        s(n, "kind"),
+                        truncate(&s(n, "message"), 70),
+                        if n["read_at"].is_null() {
+                            "new".to_owned()
+                        } else {
+                            String::new()
+                        },
+                    ]);
+                }
+                let mut out = format!("{header}\n{t}");
+                if let Some(next) = v["next_before"].as_i64() {
+                    out.push_str(&format!("\nmore: --before {next}"));
+                }
+                out
+            });
+        }
+        NotificationsCmd::Read { ids, all } => {
+            if ids.is_empty() && !all {
+                bail!("give notification ids, or --all");
+            }
+            let v = ctx.client().mark_notifications_read(&ids, all).await?;
+            ctx.out.emit(&v, || {
+                format!(
+                    "marked {} read; {} unread left",
+                    s(&v, "marked"),
+                    s(&v, "unread_count")
+                )
+            });
+        }
+    }
+    Ok(exit::OK)
+}
+
+pub async fn rfq_list(
+    ctx: &Ctx,
+    role: Option<String>,
+    status: Option<String>,
+    ticker: Option<String>,
+    limit: u32,
+    cursor: Option<String>,
+) -> Result<i32> {
+    let v = ctx
+        .client()
+        .list_rfqs(
+            role.as_deref(),
+            status.as_deref(),
+            ticker.as_deref(),
+            Some(limit.clamp(1, 200)),
+            cursor.as_deref(),
+        )
+        .await?;
+    ctx.out.emit(&v, || {
+        let rows = v["rfqs"].as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+            return "no RFQs".to_owned();
+        }
+        let mut t = table(&["rfq_id", "ticker", "side", "count", "status", "expires"]);
+        for r in &rows {
+            t.add_row(vec![
+                s(r, "rfq_id"),
+                truncate(&s(r, "ticker"), 30),
+                format!("{} {}", s(r, "action"), s(r, "side")),
+                s(r, "requested_count"),
+                s(r, "status"),
+                short_ts(&r["expires_at"].as_str().map(str::to_owned)),
+            ]);
+        }
+        let mut out = t.to_string();
+        if let Some(next) = v["next_cursor"].as_str().filter(|c| !c.is_empty()) {
+            out.push_str(&format!("\nmore: --cursor {next}"));
+        }
+        out
+    });
+    Ok(exit::OK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,5 +1124,18 @@ mod tests {
         assert!(parse_action("hold").is_err());
         assert!(matches!(parse_tif("ioc").unwrap(), Tif::Ioc));
         assert!(parse_tif("forever").is_err());
+    }
+
+    #[test]
+    fn position_limit_flags_become_a_ticker_map() {
+        let ok = parse_position_limits(&["sx-a=10".into(), " SX-B = 3 ".into()]).unwrap();
+        assert_eq!(ok.get("SX-A"), Some(&10));
+        assert_eq!(ok.get("SX-B"), Some(&3));
+        assert!(parse_position_limits(&[]).unwrap().is_empty());
+        for bad in [
+            "SX-A", "SX-A=", "=5", "SX-A=0", "SX-A=-1", "SX-A=1.5", "SX-A=ten",
+        ] {
+            assert!(parse_position_limits(&[bad.into()]).is_err(), "{bad}");
+        }
     }
 }

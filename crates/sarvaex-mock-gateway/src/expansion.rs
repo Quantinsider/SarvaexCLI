@@ -3,7 +3,7 @@
 //! status, key limits). Behaviour is simplified but follows the documented shapes
 //! and error codes so client code can be exercised offline.
 
-use super::{MockGateway, auth, err, idempotency_key, require_scope};
+use super::{MockGateway, USER_TRADER, auth, err, idempotency_key, require_scope};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
@@ -41,6 +41,14 @@ pub fn routes() -> Router<MockGateway> {
             "/v1/account/api-keys/{key_id}/limits",
             axum::routing::patch(patch_limits),
         )
+        .route(
+            "/v1/account/limits",
+            get(account_limits_get).put(account_limits_put),
+        )
+        .route("/v1/account/portfolio", get(portfolio))
+        .route("/v1/account/notifications", get(notifications_list))
+        .route("/v1/account/notifications/read", post(notifications_read))
+        .route("/v1/rfqs", get(rfqs_list))
 }
 
 fn status_body() -> Value {
@@ -550,4 +558,312 @@ async fn patch_limits(
         return r;
     }
     Json(json!({"key_id": key_id, "limits": body["limits"]})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Phase D: account limits (tighten only), portfolio, notifications, RFQ listing
+// ---------------------------------------------------------------------------
+
+fn default_limits() -> Value {
+    json!({
+        "kyc_tier": 0,
+        "max_order_size_micro_usdc": 10_000_000_000_i64,
+        "daily_loss_limit_micro_usdc": 100_000_000_000_i64,
+        "per_contract_position_limit": {},
+        "raise_policy": "limits can only be lowered through the API; the exchange operator raises them"
+    })
+}
+
+fn push_notification(
+    st: &mut super::Inner,
+    user: &str,
+    kind: &str,
+    title: &str,
+    message: &str,
+    data: Value,
+) {
+    st.seq += 1;
+    let id = st.seq;
+    let key = format!("notifications:{user}");
+    let mut list = st
+        .extra
+        .get(&key)
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    list.push(json!({
+        "notification_id": id, "kind": kind, "title": title, "message": message, "data": data,
+        "created_at": "2026-11-14T20:00:00+00:00", "read_at": null
+    }));
+    st.extra.insert(key, Value::Array(list));
+}
+
+async fn account_limits_get(State(gw): State<MockGateway>, headers: HeaderMap) -> Response {
+    let (user, _) = match auth(&gw, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let st = gw.state.lock().unwrap();
+    Json(
+        st.extra
+            .get(&format!("limits:{user}"))
+            .cloned()
+            .unwrap_or_else(default_limits),
+    )
+    .into_response()
+}
+
+async fn account_limits_put(
+    State(gw): State<MockGateway>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let user = match trader(&gw, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let max_order = body["max_order_size_micro_usdc"].as_i64();
+    let daily = body["daily_loss_limit_micro_usdc"].as_i64();
+    let contracts = body["per_contract_position_limit"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if max_order.is_none() && daily.is_none() && contracts.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "give at least one of max_order_size_micro_usdc, daily_loss_limit_micro_usdc, per_contract_position_limit",
+        );
+    }
+    if [max_order, daily].iter().flatten().any(|v| *v <= 0)
+        || contracts.values().any(|v| v.as_i64().unwrap_or(0) <= 0)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "limits must be positive integers",
+        );
+    }
+    let mut st = gw.state.lock().unwrap();
+    let key = format!("limits:{user}");
+    let mut limits = st.extra.get(&key).cloned().unwrap_or_else(default_limits);
+    let mut changed = Vec::new();
+    let refuse = |field: &str, current: i64, requested: i64| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "LIMIT_CANNOT_BE_RAISED", "field": field, "current": current, "requested": requested,
+                "message": format!("{field} can only be lowered through the API (it is {current}, you asked for {requested})")}})),
+        )
+            .into_response()
+    };
+    for (field, requested) in [
+        ("max_order_size_micro_usdc", max_order),
+        ("daily_loss_limit_micro_usdc", daily),
+    ] {
+        let Some(requested) = requested else { continue };
+        let current = limits[field].as_i64().unwrap_or(i64::MAX);
+        if requested > current {
+            return refuse(field, current, requested);
+        }
+        if requested < current {
+            limits[field] = json!(requested);
+            changed.push(json!({"field": field, "from": current, "to": requested}));
+        }
+    }
+    for (ticker, requested) in &contracts {
+        let requested = requested.as_i64().unwrap_or(0);
+        // The mock's contracts all allow 250,000 unless the account already lowered it.
+        let current = limits["per_contract_position_limit"][ticker]
+            .as_i64()
+            .unwrap_or(250_000);
+        let field = format!("per_contract_position_limit.{ticker}");
+        if requested > current {
+            return refuse(&field, current, requested);
+        }
+        if requested < current {
+            limits["per_contract_position_limit"][ticker] = json!(requested);
+            changed.push(json!({"field": field, "from": current, "to": requested}));
+        }
+    }
+    st.extra.insert(key, limits.clone());
+    if !changed.is_empty() {
+        let message = format!("{} account limit(s) were lowered.", changed.len());
+        push_notification(
+            &mut st,
+            &user,
+            "LIMITS_TIGHTENED",
+            "Account limits tightened",
+            &message,
+            json!({"changed": changed}),
+        );
+    }
+    Json(json!({"limits": limits, "changed": changed})).into_response()
+}
+
+async fn portfolio(State(gw): State<MockGateway>, headers: HeaderMap) -> Response {
+    let (user, _) = match auth(&gw, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let st = gw.state.lock().unwrap();
+    let cash = st.balances.get(&user).copied().unwrap_or(0);
+    let positions: Vec<Value> = st
+        .positions
+        .iter()
+        .filter(|((u, _), q)| *u == user && **q != 0)
+        .map(|((_, t), q)| json!({"ticker": t, "net_qty": q, "avg_cost_micro_usdc": 510_000, "realized_pnl_micro_usdc": 0, "unrealized_pnl_micro_usdc": 0}))
+        .collect();
+    let open_orders = st
+        .orders
+        .values()
+        .filter(|o| {
+            o["user_id"] == user && matches!(o["status"].as_str(), Some("OPEN" | "PARTIAL"))
+        })
+        .count();
+    let pending_triggers = st
+        .orders
+        .values()
+        .filter(|o| o["user_id"] == user && o["status"] == "TRIGGER_PENDING")
+        .count();
+    Json(json!({
+        "as_of": "2026-11-14T20:00:00.000Z", "user_id": user,
+        "account": {"user_id": user, "cash_micro_usdc": cash, "held_micro_usdc": 0, "total_micro_usdc": cash,
+            "available_collateral_micro_usdc": cash, "equity_micro_usdc": cash, "position_cost_micro_usdc": 0,
+            "realized_pnl_micro_usdc": 0, "unrealized_pnl_micro_usdc": 0, "open_positions": positions.len(), "open_orders": open_orders},
+        "positions": positions, "margin": null, "margin_unavailable_reason": "the mock gateway has no cross margin",
+        "working": {"open_orders": open_orders, "pending_triggers": pending_triggers}
+    }))
+    .into_response()
+}
+
+async fn notifications_list(
+    State(gw): State<MockGateway>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let (user, _) = match auth(&gw, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let st = gw.state.lock().unwrap();
+    let all = st
+        .extra
+        .get(&format!("notifications:{user}"))
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let unread_only = q.get("unread").is_some_and(|v| v == "true");
+    let before = q.get("before").and_then(|v| v.parse::<i64>().ok());
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let unread = all.iter().filter(|n| n["read_at"].is_null()).count();
+    let mut items: Vec<Value> = all
+        .into_iter()
+        .rev()
+        .filter(|n| !unread_only || n["read_at"].is_null())
+        .filter(|n| before.is_none_or(|b| n["notification_id"].as_i64().unwrap_or(0) < b))
+        .collect();
+    items.truncate(limit);
+    let next_before = if items.len() == limit {
+        items.last().and_then(|n| n["notification_id"].as_i64())
+    } else {
+        None
+    };
+    Json(json!({"count": items.len(), "unread_count": unread, "notifications": items, "next_before": next_before})).into_response()
+}
+
+async fn notifications_read(
+    State(gw): State<MockGateway>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let (user, _) = match auth(&gw, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let all = body["all"].as_bool().unwrap_or(false);
+    let ids: Vec<i64> = body["ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    if all == !ids.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "give ids: [..] or all: true",
+        );
+    }
+    let mut st = gw.state.lock().unwrap();
+    let key = format!("notifications:{user}");
+    let mut list = st
+        .extra
+        .get(&key)
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut marked = 0;
+    for n in list.iter_mut() {
+        let hit = all || ids.contains(&n["notification_id"].as_i64().unwrap_or(-1));
+        if hit && n["read_at"].is_null() {
+            n["read_at"] = json!("2026-11-14T20:01:00+00:00");
+            marked += 1;
+        }
+    }
+    let unread = list.iter().filter(|n| n["read_at"].is_null()).count();
+    st.extra.insert(key, Value::Array(list));
+    Json(json!({"marked": marked, "unread_count": unread})).into_response()
+}
+
+async fn rfqs_list(
+    State(gw): State<MockGateway>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let (user, _) = match auth(&gw, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let role = q
+        .get("role")
+        .map(|r| r.to_ascii_uppercase())
+        .unwrap_or_default();
+    if !["", "CREATOR", "MAKER", "ANY"].contains(&role.as_str()) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "INVALIDARGUMENT",
+            &format!("role must be CREATOR, MAKER or ANY (got '{role}')"),
+        );
+    }
+    let status = q.get("status").map(|s| s.to_ascii_uppercase());
+    if let Some(s) = &status
+        && ![
+            "OPEN",
+            "ACCEPTED_PENDING_EXECUTION",
+            "EXECUTED",
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+        ]
+        .contains(&s.as_str())
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "invalid rfq status",
+        );
+    }
+    // Two RFQs of the trader's own, one OPEN and one CANCELLED, so filters have something to do.
+    let own = [("rfq_mock_2", "CANCELLED"), ("rfq_mock_1", "OPEN")];
+    let rfqs: Vec<Value> = if user == USER_TRADER && !matches!(role.as_str(), "MAKER") {
+        own.iter()
+            .filter(|(_, s)| status.as_deref().is_none_or(|want| want == *s))
+            .filter(|_| q.get("ticker").is_none_or(|t| t == "SX-FEDDEC-26OCT-H25"))
+            .map(|(id, s)| json!({"rfq_id": id, "client_rfq_id": format!("c-{id}"), "creator_user_id": user, "ticker": "SX-FEDDEC-26OCT-H25",
+                "side": "YES", "action": "BUY", "requested_count": 5, "status": s, "accepted_quote_id": "",
+                "expires_at": "2026-12-01T00:00:00+00:00", "created_at": "2026-11-14T10:00:00+00:00"}))
+            .collect()
+    } else {
+        vec![]
+    };
+    Json(json!({"rfqs": rfqs, "next_cursor": ""})).into_response()
 }

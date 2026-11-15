@@ -27,7 +27,7 @@ pub mod ws;
 
 pub use client::{
     Client, ClientConfig, Credential, DEFAULT_BASE_URL, DEFAULT_WS_URL, Guards, LOCAL_BASE_URL,
-    LOCAL_WS_URL,
+    LOCAL_WS_URL, RateLimit,
 };
 pub use error::{Result, SarvaexError};
 pub use models::*;

@@ -2,6 +2,19 @@
 
 Versions follow [semver](https://semver.org). The version lives in one place: `[workspace.package] version` in `Cargo.toml`.
 
+## 0.4.0
+
+Account safety and awareness.
+
+- `account limits`: show your account limits, or lower them (`--max-order-size`, `--daily-loss-limit`, `--position-limit TICKER=N`). Limits only go down through the API: a higher value is refused with `LIMIT_CANNOT_BE_RAISED` and nothing changes.
+- `account portfolio`: balance, equity and P&L, positions, cross margin and what is still working, in one view.
+- `account notifications list | read`: what happened while you were away (a stop fired or was rejected, the dead man's switch fired, limits lowered, an API key created or revoked). `stream --notifications` delivers them as they happen.
+- `rfq list`: your own RFQs (created, quoted, or both).
+- SDK: the same as methods, plus `Client::rate_limit("read" | "write")`, which remembers the gateway's `X-RateLimit-*` headers. A 429 without `Retry-After` now waits for the reset the headers announce.
+- MCP tools: `get_portfolio`, `get_account_limits`, `lower_account_limits`, `get_notifications`, `mark_notifications_read`, `list_my_rfqs`.
+- OpenAPI 1.2.0 covers all of it. The mock gateway implements it for offline testing.
+- Needs the current gateway (api.sarvaex.com has it). Older gateways answer 404 to the new routes.
+
 ## 0.3.0
 
 Stop and take-profit orders for futures.

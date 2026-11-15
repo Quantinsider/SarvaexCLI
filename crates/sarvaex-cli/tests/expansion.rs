@@ -635,3 +635,136 @@ async fn trigger_orders_are_refused_locally_when_misused() {
     );
     assert_eq!(code, 7);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_limits_can_be_shown_and_only_lowered() {
+    let env = setup("limits").await;
+    let v = ok(&env, &["account", "limits"]);
+    let start = v["max_order_size_micro_usdc"].as_i64().unwrap();
+    assert_eq!(start, 10_000_000_000);
+
+    // Lowering in USDC; the answer lists what changed and the new limits.
+    let v = ok(
+        &env,
+        &["account", "limits", "--max-order-size", "5000", "--yes"],
+    );
+    assert_eq!(v["limits"]["max_order_size_micro_usdc"], 5_000_000_000_i64);
+    assert_eq!(v["changed"][0]["from"], start);
+    let v = ok(
+        &env,
+        &[
+            "account",
+            "limits",
+            "--position-limit",
+            &format!("{BINARY}=10"),
+            "--yes",
+        ],
+    );
+    assert_eq!(v["limits"]["per_contract_position_limit"][BINARY], 10);
+
+    // A higher value is refused with the gateway's code and exit status, and nothing moves.
+    let (code, _, err) = run(
+        &env,
+        &["account", "limits", "--max-order-size", "6000", "--yes"],
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("LIMIT_CANNOT_BE_RAISED"), "{err}");
+    assert_eq!(
+        ok(&env, &["account", "limits"])["max_order_size_micro_usdc"],
+        5_000_000_000_i64
+    );
+
+    // Bad input is caught before anything is sent.
+    for (args, needle) in [
+        (
+            vec!["account", "limits", "--position-limit", "nonsense", "--yes"],
+            "TICKER=CONTRACTS",
+        ),
+        (
+            vec![
+                "account",
+                "limits",
+                "--position-limit",
+                "SX-A=zero",
+                "--yes",
+            ],
+            "whole number",
+        ),
+        (
+            vec!["account", "limits", "--max-order-size", "0", "--yes"],
+            "positive",
+        ),
+    ] {
+        let (code, _, err) = run(&env, &args, &[]);
+        assert_ne!(code, 0, "{args:?}");
+        assert!(err.contains(needle), "{args:?}: {err}");
+    }
+    // Read-only mode blocks lowering (it is a change) but not looking.
+    let guard = [("SARVAEX_READ_ONLY", "true")];
+    let (code, _, _) = run(
+        &env,
+        &["account", "limits", "--max-order-size", "100", "--yes"],
+        &guard,
+    );
+    assert_eq!(code, 7);
+    let (code, _, _) = run(&env, &["account", "limits"], &guard);
+    assert_eq!(code, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn portfolio_notifications_and_rfq_list() {
+    let env = setup("phased").await;
+    let v = ok(&env, &["account", "portfolio"]);
+    assert!(v["account"]["equity_micro_usdc"].is_number());
+    assert!(v["working"]["open_orders"].is_number());
+
+    // Lowering a limit leaves a notification; read state round-trips.
+    ok(
+        &env,
+        &["account", "limits", "--daily-loss-limit", "1000", "--yes"],
+    );
+    let v = ok(&env, &["account", "notifications", "list"]);
+    assert_eq!(v["unread_count"], 1);
+    assert_eq!(v["notifications"][0]["kind"], "LIMITS_TIGHTENED");
+    let id = v["notifications"][0]["notification_id"]
+        .as_i64()
+        .unwrap()
+        .to_string();
+    let v = ok(&env, &["account", "notifications", "read", &id]);
+    assert_eq!(v["marked"], 1);
+    assert_eq!(
+        ok(&env, &["account", "notifications", "list", "--unread"])["count"],
+        0
+    );
+    let (code, _, err) = run(&env, &["account", "notifications", "read"], &[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("--all"), "{err}");
+    assert_eq!(
+        ok(&env, &["account", "notifications", "read", "--all"])["unread_count"],
+        0
+    );
+
+    // RFQ listing: mine by default, filters, and a clear error for a bad role.
+    assert_eq!(
+        ok(&env, &["rfq", "list"])["rfqs"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        ok(&env, &["rfq", "list", "--status", "open"])["rfqs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        ok(&env, &["rfq", "list", "--role", "maker"])["rfqs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let (code, _, err) = run(&env, &["rfq", "list", "--role", "everyone"], &[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("role must be"), "{err}");
+}

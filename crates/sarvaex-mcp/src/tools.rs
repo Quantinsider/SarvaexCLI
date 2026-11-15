@@ -290,6 +290,46 @@ pub struct ClosePositionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LowerLimitsParams {
+    /// New (lower) largest order, in USDC at risk.
+    pub max_order_size_usdc: Option<f64>,
+    /// New (lower) daily loss limit, in USDC.
+    pub daily_loss_limit_usdc: Option<f64>,
+    /// New (lower) position limit per contract: {"SX-A": 100}.
+    pub position_limits: Option<std::collections::BTreeMap<String, i64>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NotificationsParams {
+    /// Only unread notifications.
+    pub unread_only: Option<bool>,
+    /// 1-200 (default 50).
+    pub limit: Option<u32>,
+    /// Page back: only notifications with an id below this (use the previous `next_before`).
+    pub before: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MarkReadParams {
+    /// Notification ids to mark read.
+    pub ids: Option<Vec<i64>>,
+    /// Or mark every unread notification read.
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListRfqsParams {
+    /// `CREATOR` (default), `MAKER` or `ANY`.
+    pub role: Option<String>,
+    /// `OPEN`, `ACCEPTED_PENDING_EXECUTION`, `EXECUTED`, `CANCELLED`, `EXPIRED` or `REJECTED`.
+    pub status: Option<String>,
+    pub ticker: Option<String>,
+    /// 1-200 (default 50).
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CancelAfterParams {
     /// 1–3600 arms the dead man's switch; 0 disarms it.
     pub seconds: u32,
@@ -1266,6 +1306,122 @@ impl SarvaexMcp {
     ) -> Result<CallToolResult, McpError> {
         let client = self.trading_client(&ctx)?;
         ok(try_tool!(client.set_cancel_after(p.seconds, None).await))
+    }
+
+    #[tool(
+        description = "Everything about the account in one call: cash, held and equity, realized and unrealized P&L, open positions, cross margin and how many orders and triggers are working.",
+        annotations(title = "Portfolio", read_only_hint = true)
+    )]
+    async fn get_portfolio(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(client.portfolio().await))
+    }
+
+    #[tool(
+        description = "The limits enforced on this account: largest order, daily loss limit and per-contract position limits.",
+        annotations(title = "Account limits", read_only_hint = true)
+    )]
+    async fn get_account_limits(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(client.account_limits().await))
+    }
+
+    #[tool(
+        description = "Lower the account's limits (largest order, daily loss, per-contract position). Limits can only go DOWN here: asking for a higher value is refused and nothing changes, so this is a safe way to make an account stricter. Only the exchange operator can raise them.",
+        annotations(
+            title = "Lower account limits",
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn lower_account_limits(
+        &self,
+        Parameters(p): Parameters<LowerLimitsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        let micro = |usdc: f64| (usdc * 1_000_000.0).round() as i64;
+        ok(try_tool!(
+            client
+                .lower_account_limits(
+                    p.max_order_size_usdc.map(micro),
+                    p.daily_loss_limit_usdc.map(micro),
+                    &p.position_limits.unwrap_or_default(),
+                    None,
+                )
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Account notifications, newest first: a stop or take-profit fired or was rejected, the dead man's switch cancelled orders, limits were lowered, an API key was created or revoked. Check this after running unattended.",
+        annotations(title = "Notifications", read_only_hint = true)
+    )]
+    async fn get_notifications(
+        &self,
+        Parameters(p): Parameters<NotificationsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(
+            client
+                .notifications(
+                    p.unread_only.unwrap_or(false),
+                    Some(p.limit.unwrap_or(50).clamp(1, 200)),
+                    p.before,
+                )
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Mark notifications as read, by id or all of them.",
+        annotations(
+            title = "Mark notifications read",
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn mark_notifications_read(
+        &self,
+        Parameters(p): Parameters<MarkReadParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.trading_client(&ctx)?;
+        ok(try_tool!(
+            client
+                .mark_notifications_read(&p.ids.unwrap_or_default(), p.all.unwrap_or(false))
+                .await
+        ))
+    }
+
+    #[tool(
+        description = "Your own RFQs (requests for quote): those you created (default), those you quoted as a maker, or both. RFQs are private to their creator and the makers who quoted them; there is no public list.",
+        annotations(title = "My RFQs", read_only_hint = true)
+    )]
+    async fn list_my_rfqs(
+        &self,
+        Parameters(p): Parameters<ListRfqsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (client, _) = self.client(&ctx)?;
+        ok(try_tool!(
+            client
+                .list_rfqs(
+                    p.role.as_deref(),
+                    p.status.as_deref(),
+                    p.ticker.as_deref(),
+                    Some(p.limit.unwrap_or(50).clamp(1, 200)),
+                    p.cursor.as_deref(),
+                )
+                .await
+        ))
     }
 
     #[tool(

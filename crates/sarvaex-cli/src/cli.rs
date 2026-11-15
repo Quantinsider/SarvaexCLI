@@ -730,6 +730,50 @@ pub enum AccountCmd {
     /// Dead man's switch: cancel every working order unless refreshed in time
     #[command(subcommand)]
     CancelAfter(CancelAfterCmd),
+    /// Show your account limits, or lower them (limits can only go down through the API)
+    Limits(AccountLimitsArgs),
+    /// Balance, equity and P&L, positions, cross margin and working counts in one view
+    Portfolio,
+    /// Things that happened to the account: a trigger fired, the dead man's switch fired, limits or keys changed
+    #[command(subcommand)]
+    Notifications(NotificationsCmd),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct AccountLimitsArgs {
+    /// Lower the largest order you can place, in USDC at risk
+    #[arg(long)]
+    pub max_order_size: Option<f64>,
+    /// Lower the daily loss at which trading stops, in USDC
+    #[arg(long)]
+    pub daily_loss_limit: Option<f64>,
+    /// Lower the position limit on a contract, as TICKER=CONTRACTS (repeat the flag)
+    #[arg(long, value_name = "TICKER=CONTRACTS")]
+    pub position_limit: Vec<String>,
+    #[arg(long)]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotificationsCmd {
+    /// List notifications, newest first
+    List {
+        /// Only the ones you have not read
+        #[arg(long)]
+        unread: bool,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Page back: only notifications below this id (use the previous `next_before`)
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Mark notifications read, by id or all
+    Read {
+        ids: Vec<i64>,
+        /// Mark every unread notification read
+        #[arg(long, conflicts_with = "ids")]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -786,6 +830,22 @@ pub enum DemoCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum RfqCmd {
+    /// List your RFQs: the ones you created, quoted or both (RFQs are private to their creator and the makers who quoted them)
+    List {
+        /// creator (default) | maker | any
+        #[arg(long)]
+        role: Option<String>,
+        /// open | accepted_pending_execution | executed | cancelled | expired | rejected
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        ticker: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// From a previous page's `next_cursor`
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     Create {
         ticker: String,
         #[arg(long, short = 's', value_enum)]
@@ -861,7 +921,7 @@ pub enum MarketRequestsCmd {
 #[derive(Debug, Args)]
 pub struct StreamArgs {
     /// Tickers for the market/trade stream and the --ticker-stats / --candles channels
-    #[arg(required_unless_present_any = ["orders", "lifecycle", "exchange"])]
+    #[arg(required_unless_present_any = ["orders", "lifecycle", "exchange", "notifications"])]
     pub tickers: Vec<String>,
     /// Also subscribe to your private fills (needs websocket:read)
     #[arg(long)]
@@ -881,6 +941,9 @@ pub struct StreamArgs {
     /// Exchange mode changes (OPEN, CANCEL_ONLY, CLOSED, maintenance windows)
     #[arg(long)]
     pub exchange: bool,
+    /// Account notifications as they happen (trigger fired, dead man's switch, limits, keys); needs websocket:read
+    #[arg(long)]
+    pub notifications: bool,
     /// 24h statistics for each ticker as they change
     #[arg(long)]
     pub ticker_stats: bool,
