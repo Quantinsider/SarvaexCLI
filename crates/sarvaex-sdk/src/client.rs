@@ -1748,6 +1748,18 @@ fn parse_error(status: StatusCode, text: &str, retry_after: Option<u64>) -> Sarv
         } else {
             env.error.code
         };
+        // Insufficient funds arrives as 502 INTERNAL; it is final, so give it its own code.
+        let code = if status == StatusCode::BAD_GATEWAY
+            && env
+                .error
+                .message
+                .to_ascii_lowercase()
+                .contains("insufficient funds")
+        {
+            crate::error::INSUFFICIENT_FUNDS.to_owned()
+        } else {
+            code
+        };
         return SarvaexError::Api {
             status: status.as_u16(),
             code,
@@ -1812,6 +1824,37 @@ mod tests {
             Credential::Bearer(_)
         ));
         assert!(matches!(Credential::from_secret("  "), Credential::None));
+    }
+
+    #[test]
+    fn insufficient_funds_is_final() {
+        let e = parse_error(
+            StatusCode::BAD_GATEWAY,
+            r#"{"error":{"code":"INTERNAL","message":"hold placement failed: Insufficient Funds"}}"#,
+            None,
+        );
+        assert_eq!(e.code(), "INSUFFICIENT_FUNDS");
+        assert!(e.is_insufficient_funds());
+        assert!(
+            !e.is_retryable(),
+            "retrying an underfunded order cannot succeed"
+        );
+        assert_eq!(e.status(), Some(502));
+        // Other 502s stay retryable.
+        let other = parse_error(
+            StatusCode::BAD_GATEWAY,
+            r#"{"error":{"code":"INTERNAL","message":"ledger timeout"}}"#,
+            None,
+        );
+        assert_eq!(other.code(), "INTERNAL");
+        assert!(other.is_retryable());
+        // The phrase only counts on a 502.
+        let validation = parse_error(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"INVALID_ARGUMENT","message":"insufficient funds in example"}}"#,
+            None,
+        );
+        assert_eq!(validation.code(), "INVALID_ARGUMENT");
     }
 
     #[test]

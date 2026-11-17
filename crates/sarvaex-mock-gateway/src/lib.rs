@@ -595,6 +595,14 @@ async fn submit_order(
         );
     }
     let count = body["count"].as_i64().unwrap_or(0);
+    if count == 888 {
+        // What production returns when the ledger cannot place the hold (decided 12 Nov 2026).
+        return err(
+            StatusCode::BAD_GATEWAY,
+            "INTERNAL",
+            "hold placement failed: insufficient funds",
+        );
+    }
     if count <= 0 {
         return err(
             StatusCode::BAD_REQUEST,

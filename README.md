@@ -63,6 +63,7 @@ Add `--json` for machine output (automatic when stdout is not a TTY). Errors are
 
 Exit codes: `0` ok · `1` error · `2` usage/validation · `3` auth · `4` order rejected by the
 exchange · `5` rate limited · `6` network · `7` blocked by a local safety guard.
+`INSUFFICIENT_FUNDS` (an order the account cannot fund) exits with `4` and is never retried.
 
 ## More commands
 

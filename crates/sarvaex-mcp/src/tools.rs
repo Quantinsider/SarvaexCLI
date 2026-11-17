@@ -375,6 +375,9 @@ fn hint_for(e: &sarvaex_sdk::SarvaexError) -> &'static str {
             "The API key lacks the required scope (trading:write for orders)."
         }
         "RATE_LIMITED" => "Slow down; wait for retry_after_seconds before calling again.",
+        "INSUFFICIENT_FUNDS" => {
+            "Not enough available balance for this order (including any fee reserve). Do not retry it unchanged: reduce the size or price, cancel other orders to free held funds, or add funds. Check get_balance."
+        }
         "MARKET_NOT_AVAILABLE" => {
             "No live quote on the opposite side; use a limit order with an explicit price."
         }

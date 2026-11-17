@@ -102,6 +102,8 @@ pub fn exit_code_for(err: &anyhow::Error) -> i32 {
     match err.downcast_ref::<SarvaexError>() {
         Some(e) if e.is_unauthenticated() || e.is_forbidden() => exit::AUTH,
         Some(e) if e.is_rate_limited() => exit::RATE_LIMITED,
+        // The exchange refused the order (not enough funds): same exit code as any rejection.
+        Some(e) if e.is_insufficient_funds() => exit::REJECTED,
         Some(SarvaexError::Transport(_)) | Some(SarvaexError::WebSocket(_)) => exit::NETWORK,
         Some(SarvaexError::Guard(_)) => exit::GUARD,
         Some(SarvaexError::Validation(_)) => exit::USAGE,

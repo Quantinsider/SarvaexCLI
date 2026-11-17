@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 pub type Result<T> = std::result::Result<T, SarvaexError>;
 
+/// Stable code the SDK gives the exchange's "insufficient funds" refusal. The gateway reports it
+/// as HTTP 502 `INTERNAL` with "insufficient funds" in the message; the SDK renames it so callers
+/// can branch on it and never retries it.
+pub const INSUFFICIENT_FUNDS: &str = "INSUFFICIENT_FUNDS";
+
 #[derive(Debug, thiserror::Error)]
 pub enum SarvaexError {
     /// The gateway returned an error envelope.
@@ -96,7 +101,15 @@ impl SarvaexError {
     }
 
     /// Whether retrying the identical request (same idempotency key) is sensible.
+    /// The exchange refused the order for lack of funds. Final: retrying cannot help.
+    pub fn is_insufficient_funds(&self) -> bool {
+        matches!(self, Self::Api { code, .. } if code == INSUFFICIENT_FUNDS)
+    }
+
     pub fn is_retryable(&self) -> bool {
+        if self.is_insufficient_funds() {
+            return false;
+        }
         match self {
             Self::Api { status, code, .. } => {
                 matches!(status, 429 | 502 | 503 | 504)

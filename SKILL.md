@@ -156,6 +156,10 @@ is not a terminal). Errors are `{"error":{"code","message",...}}` on stderr.
 Exit codes: `0` ok · `1` error · `2` usage · `3` auth · `4` order rejected ·
 `5` rate limited · `6` network · `7` blocked by local safety guard.
 
+`INSUFFICIENT_FUNDS` (exit code `4`) means the account cannot fund the order,
+including any fee reserve. It is final: do not resend the same order. Reduce the
+size or price, cancel other orders to free held funds, or add funds first.
+
 ## MCP tools (same semantics)
 
 `list_markets`, `search_markets`, `get_market`, `get_orderbook`, `get_recent_fills`,

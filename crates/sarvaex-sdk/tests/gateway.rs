@@ -724,3 +724,30 @@ fn rate_limit_parsing_needs_all_three_numbers() {
         "garbage is ignored, not guessed"
     );
 }
+
+#[tokio::test]
+async fn insufficient_funds_is_not_retried() {
+    let gw = MockGateway::new();
+    let base = gw.spawn().await;
+    let c = client(&base, API_KEY_TRADER, Guards::default()).await;
+    let before = gw
+        .calls()
+        .iter()
+        .filter(|call| call.as_str() == "POST /v1/orders")
+        .count();
+    let e = c
+        .place_order(
+            &NewOrder::limit("SX-FEDDEC-26OCT-H25", Side::Yes, Action::Buy, 51, 888),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "INSUFFICIENT_FUNDS");
+    let sent = gw
+        .calls()
+        .iter()
+        .filter(|call| call.as_str() == "POST /v1/orders")
+        .count()
+        - before;
+    assert_eq!(sent, 1, "sent once, not five times");
+}

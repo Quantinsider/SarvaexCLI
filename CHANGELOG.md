@@ -2,6 +2,13 @@
 
 Versions follow [semver](https://semver.org). The version lives in one place: `[workspace.package] version` in `Cargo.toml`.
 
+## 0.4.1
+
+Underfunded orders fail once.
+
+- An order the account cannot fund (the gateway answers 502 "insufficient funds") now has its own error code, `INSUFFICIENT_FUNDS`. It is final: the SDK no longer resends it, so you get one failure instead of five attempts. The CLI exits with `4`; MCP gives a hint to reduce the size or add funds.
+- No gateway change needed beyond what api.sarvaex.com already runs.
+
 ## 0.4.0
 
 Account safety and awareness.
